@@ -294,8 +294,8 @@ var sound_queue: std.ArrayList(QueueItem) = undefined; // initialized in main()
 var current_pid = std.atomic.Value(i32).init(-1);
 
 // Runtime-tunable via !chance / !slow / !fast - not persisted across restarts.
-// slow_factor/fast_factor are pitch multipliers (duration is preserved either
-// way) - 0.7 = noticeably deeper voice, 1.3 = noticeably higher voice.
+// slow_factor/fast_factor affect pitch AND speed together (like a record played
+// at the wrong speed) - 0.7 = deeper voice + slower, 1.3 = higher voice + faster.
 const EffectSettings = struct {
     chance_percent: u32 = 10,
     slow_factor: f64 = 0.7,
@@ -383,8 +383,8 @@ fn playerLoop(ctx: *const PlayerCtx) void {
 fn playOne(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) void {
     const effect_label: []const u8 = switch (effect) {
         .none => "",
-        .slow => " (pitched down)",
-        .fast => " (pitched up)",
+        .slow => " (slowed + pitched down)",
+        .fast => " (sped up + pitched up)",
     };
     std.debug.print("[soundbot] playing {s}{s}\n", .{ sound_path, effect_label });
 
@@ -474,25 +474,19 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) !void
         .fast => getEffectSettings().fast_factor,
     };
 
-    // True pitch shift, duration unchanged: asetrate reinterprets the audio at a
-    // scaled sample rate, which shifts pitch AND speed together (like a record
-    // played at the wrong speed); atempo set to the *reciprocal* of that same
-    // factor cancels the speed change back out while leaving the pitch shift in
-    // place. asetrate needs a literal number here, not an expression, so the
-    // file's actual rate is probed first rather than assumed.
-    const tempo_compensation = 1.0 / factor;
+    // Combined pitch + speed change, tied together via the same factor - like a
+    // record played at the wrong speed: asetrate reinterprets the audio at a
+    // scaled sample rate, shifting pitch and tempo together. asetrate needs a
+    // literal number here, not an expression, so the file's actual rate is
+    // probed first rather than assumed.
     const original_rate = probeSampleRate(ctx.allocator, sound_path) catch 48000;
     const new_rate: f64 = @as(f64, @floatFromInt(original_rate)) * factor;
 
-    var filter_buf: [96]u8 = undefined;
-    // atempo only supports 0.5-2.0 in a single filter instance, and since that
-    // range is symmetric under reciprocation, constraining the pitch factor
-    // itself to 0.5-2.0 (already enforced by !slow/!fast) keeps the compensation
-    // value safely in range too, with no extra check needed here.
+    var filter_buf: [64]u8 = undefined;
     const filter_arg = try std.fmt.bufPrint(
         &filter_buf,
-        "asetrate={d:.0},aresample={d},atempo={d:.3}",
-        .{ new_rate, original_rate, tempo_compensation },
+        "asetrate={d:.0},aresample={d}",
+        .{ new_rate, original_rate },
     );
 
     const tmp_path = try std.fmt.allocPrint(ctx.allocator, "/tmp/soundbot_effect_{d}.wav", .{std.time.milliTimestamp()});
@@ -799,11 +793,11 @@ pub fn main() !void {
                 continue;
             };
             if (factor < 0.5 or factor > 2.0) {
-                std.debug.print("[soundbot] !slow should be 0.5-2.0 (atempo's per-filter limit, which this pitch shift relies on), got {d}\n", .{factor});
+                std.debug.print("[soundbot] !slow should be 0.5-2.0 (outside that it stops sounding like a usable effect), got {d}\n", .{factor});
                 continue;
             }
             setEffectSlow(factor);
-            std.debug.print("[soundbot] pitch-down factor set to {d}x\n", .{factor});
+            std.debug.print("[soundbot] slow+pitch-down factor set to {d}x\n", .{factor});
             continue;
         }
 
@@ -814,11 +808,11 @@ pub fn main() !void {
                 continue;
             };
             if (factor < 0.5 or factor > 2.0) {
-                std.debug.print("[soundbot] !fast should be 0.5-2.0 (atempo's per-filter limit, which this pitch shift relies on), got {d}\n", .{factor});
+                std.debug.print("[soundbot] !fast should be 0.5-2.0 (outside that it stops sounding like a usable effect), got {d}\n", .{factor});
                 continue;
             }
             setEffectFast(factor);
-            std.debug.print("[soundbot] pitch-up factor set to {d}x\n", .{factor});
+            std.debug.print("[soundbot] fast+pitch-up factor set to {d}x\n", .{factor});
             continue;
         }
 
