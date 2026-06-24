@@ -294,10 +294,12 @@ var sound_queue: std.ArrayList(QueueItem) = undefined; // initialized in main()
 var current_pid = std.atomic.Value(i32).init(-1);
 
 // Runtime-tunable via !chance / !slow / !fast - not persisted across restarts.
+// slow_factor/fast_factor are pitch multipliers (duration is preserved either
+// way) - 0.7 = noticeably deeper voice, 1.3 = noticeably higher voice.
 const EffectSettings = struct {
     chance_percent: u32 = 10,
     slow_factor: f64 = 0.7,
-    fast_factor: f64 = 1.3, // the request's phrasing was ambiguous on the exact "sped up" value - this is a starting guess, tune with !fast
+    fast_factor: f64 = 1.3,
 };
 
 var effect_mutex: std.Thread.Mutex = .{};
@@ -381,8 +383,8 @@ fn playerLoop(ctx: *const PlayerCtx) void {
 fn playOne(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) void {
     const effect_label: []const u8 = switch (effect) {
         .none => "",
-        .slow => " (slowed)",
-        .fast => " (sped up)",
+        .slow => " (pitched down)",
+        .fast => " (pitched up)",
     };
     std.debug.print("[soundbot] playing {s}{s}\n", .{ sound_path, effect_label });
 
@@ -444,10 +446,25 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) !void
         .slow => getEffectSettings().slow_factor,
         .fast => getEffectSettings().fast_factor,
     };
-    var filter_buf: [64]u8 = undefined;
-    // atempo only supports 0.5-2.0 in a single filter instance - chain multiple
-    // atempo filters if you ever need a more extreme factor than that.
-    const filter_arg = try std.fmt.bufPrint(&filter_buf, "atempo={d:.3}", .{factor});
+
+    // True pitch shift, duration unchanged: asetrate reinterprets the audio at a
+    // scaled sample rate, which shifts pitch AND speed together (like a record
+    // played at the wrong speed); atempo set to the *reciprocal* of that same
+    // factor cancels the speed change back out while leaving the pitch shift in
+    // place. "sample_rate" here is ffmpeg's own expression variable referring to
+    // the input's actual native rate, so this works regardless of the file's
+    // real sample rate without needing to probe it first.
+    const tempo_compensation = 1.0 / factor;
+    var filter_buf: [96]u8 = undefined;
+    // atempo only supports 0.5-2.0 in a single filter instance, and since that
+    // range is symmetric under reciprocation, constraining the pitch factor
+    // itself to 0.5-2.0 (already enforced by !slow/!fast) keeps the compensation
+    // value safely in range too, with no extra check needed here.
+    const filter_arg = try std.fmt.bufPrint(
+        &filter_buf,
+        "asetrate=sample_rate*{d:.3},aresample=48000,atempo={d:.3}",
+        .{ factor, tempo_compensation },
+    );
 
     const tmp_path = try std.fmt.allocPrint(ctx.allocator, "/tmp/soundbot_effect_{d}.wav", .{std.time.milliTimestamp()});
     defer ctx.allocator.free(tmp_path);
@@ -753,11 +770,11 @@ pub fn main() !void {
                 continue;
             };
             if (factor < 0.5 or factor > 2.0) {
-                std.debug.print("[soundbot] !slow should be 0.5-2.0 (ffmpeg's atempo limit per filter), got {d}\n", .{factor});
+                std.debug.print("[soundbot] !slow should be 0.5-2.0 (atempo's per-filter limit, which this pitch shift relies on), got {d}\n", .{factor});
                 continue;
             }
             setEffectSlow(factor);
-            std.debug.print("[soundbot] slow factor set to {d}x\n", .{factor});
+            std.debug.print("[soundbot] pitch-down factor set to {d}x\n", .{factor});
             continue;
         }
 
@@ -768,11 +785,11 @@ pub fn main() !void {
                 continue;
             };
             if (factor < 0.5 or factor > 2.0) {
-                std.debug.print("[soundbot] !fast should be 0.5-2.0 (ffmpeg's atempo limit per filter), got {d}\n", .{factor});
+                std.debug.print("[soundbot] !fast should be 0.5-2.0 (atempo's per-filter limit, which this pitch shift relies on), got {d}\n", .{factor});
                 continue;
             }
             setEffectFast(factor);
-            std.debug.print("[soundbot] fast factor set to {d}x\n", .{factor});
+            std.debug.print("[soundbot] pitch-up factor set to {d}x\n", .{factor});
             continue;
         }
 
