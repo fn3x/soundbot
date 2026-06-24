@@ -13,7 +13,14 @@ your-repo/
 ├── soundbot/
 │   ├── Dockerfile
 │   ├── build.zig
-│   ├── src/main.zig
+│   ├── src/
+│   │   ├── main.zig        (entrypoint + chat dispatch loop)
+│   │   ├── config.zig      (env-var loading)
+│   │   ├── ts_protocol.zig (TS3/TS6 string escaping, field extraction)
+│   │   ├── sounds.zig      (sound-file lookup, !sounds list)
+│   │   ├── query.zig       (ServerQuery I/O, chat replies, client/channel lookups)
+│   │   ├── playback.zig    (queue, pitch/speed effects, the player thread)
+│   │   └── tts.zig         (Amazon Polly via the AWS CLI)
 │   └── scripts/entrypoint.sh
 └── docker-compose.soundbot.yml          <- for the HOST, not really part of the image build
 ```
@@ -105,7 +112,7 @@ docker compose -f docker-compose.yml -f docker-compose.soundbot.yml up -d
 - `!join <channel_id>` — moves it to a specific channel regardless of where typed
 - `!chance <0-100>` — % chance a played sound gets pitch+speed shifted
 - `!slow <0.5-2.0>` / `!fast <0.5-2.0>` — how much, when it does (0.7/1.3 by default)
-- `!ttsg`/`!ttsb`/`!ttsjo`/`!ttsma`/`!ttssa`/`!ttsam`/`!ttsem`/`!ttsju`/`!ttsni`/`!ttsca`/`!ttsm`/`!ttst <text>` —
+- `!tts[g|b|jo|ma|sa|am|em|ju|ni|ca|m|t] <text>` —
   text-to-speech via Amazon Polly: Giorgio, Brian, Joanna, Matthew, Salli, Amy,
   Emma, Justin, Nicole, Carla, Maxim, Tatyana (all standard-engine, non-neural voices). `!tts <text>`
   picks one of these at random. Capped at 150 characters - longer input is

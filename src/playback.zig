@@ -1,0 +1,263 @@
+const std = @import("std");
+const sounds = @import("sounds.zig");
+
+fn runCmd(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    var child = std.process.Child.init(argv, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Inherit;
+    try child.spawn();
+    _ = try child.wait();
+}
+
+const Effect = enum { none, slow, fast };
+
+const QueueItem = struct {
+    sound_path: []const u8,
+    effect: Effect,
+    delete_after: bool, // true for dynamically-generated files (TTS output) that should be cleaned up after playing
+};
+
+var queue_mutex: std.Thread.Mutex = .{};
+var queue_cond: std.Thread.Condition = .{};
+var sound_queue: std.ArrayList(QueueItem) = undefined; // initialized via initQueue()
+
+// QueueItem is private to this module, so main() can't construct
+// std.ArrayList(QueueItem) directly - this is the public init entry point instead.
+pub fn initQueue(allocator: std.mem.Allocator) void {
+    sound_queue = std.ArrayList(QueueItem).init(allocator);
+}
+
+// pid of the currently-running ffmpeg, or -1 if nothing is playing right now.
+// Only ever *read* by the stop-handler thread and *written* by the player thread,
+// so a plain atomic is enough - no need to share the std.process.Child itself
+// across threads (that would risk two threads both calling wait() on it).
+var current_pid = std.atomic.Value(i32).init(-1);
+
+// Runtime-tunable via !chance / !slow / !fast - not persisted across restarts.
+// slow_factor/fast_factor affect pitch AND speed together (like a record played
+// at the wrong speed) - 0.7 = deeper voice + slower, 1.3 = higher voice + faster.
+const EffectSettings = struct {
+    chance_percent: u32 = 10,
+    slow_factor: f64 = 0.7,
+    fast_factor: f64 = 1.3, // a starting guess - tune with !fast if 1.3 isn't what you want
+};
+
+var effect_mutex: std.Thread.Mutex = .{};
+var effect_settings: EffectSettings = .{};
+
+fn getEffectSettings() EffectSettings {
+    effect_mutex.lock();
+    defer effect_mutex.unlock();
+    return effect_settings;
+}
+
+pub fn setEffectChance(percent: u32) void {
+    effect_mutex.lock();
+    defer effect_mutex.unlock();
+    effect_settings.chance_percent = percent;
+}
+
+pub fn setEffectSlow(factor: f64) void {
+    effect_mutex.lock();
+    defer effect_mutex.unlock();
+    effect_settings.slow_factor = factor;
+}
+
+pub fn setEffectFast(factor: f64) void {
+    effect_mutex.lock();
+    defer effect_mutex.unlock();
+    effect_settings.fast_factor = factor;
+}
+
+fn rollEffect() Effect {
+    const settings = getEffectSettings();
+    const roll = std.crypto.random.intRangeLessThan(u32, 0, 100);
+    if (roll >= settings.chance_percent) return .none;
+    return if (std.crypto.random.boolean()) .slow else .fast;
+}
+
+pub const PlayerCtx = struct {
+    allocator: std.mem.Allocator,
+    ptt_key: []const u8,
+    sink: []const u8,
+};
+
+pub fn enqueueSound(sound_path: []const u8, delete_after: bool) !void {
+    const effect = rollEffect();
+    queue_mutex.lock();
+    defer queue_mutex.unlock();
+    try sound_queue.append(.{ .sound_path = sound_path, .effect = effect, .delete_after = delete_after });
+    queue_cond.signal();
+}
+
+pub fn clearQueueAndStopCurrent(allocator: std.mem.Allocator) void {
+    queue_mutex.lock();
+    for (sound_queue.items) |item| {
+        if (item.delete_after) std.fs.cwd().deleteFile(item.sound_path) catch {};
+        allocator.free(item.sound_path);
+    }
+    sound_queue.clearRetainingCapacity();
+    queue_mutex.unlock();
+
+    const pid = current_pid.load(.acquire);
+    if (pid != -1) {
+        std.posix.kill(pid, std.posix.SIG.KILL) catch |err| {
+            std.debug.print("[soundbot] failed to kill current playback: {}\n", .{err});
+        };
+    }
+
+    std.debug.print("[soundbot] queue cleared, current sound stopped\n", .{});
+}
+
+pub fn playerLoop(ctx: *const PlayerCtx) void {
+    while (true) {
+        queue_mutex.lock();
+        while (sound_queue.items.len == 0) {
+            queue_cond.wait(&queue_mutex);
+        }
+        const item = sound_queue.orderedRemove(0);
+        queue_mutex.unlock();
+
+        playOne(ctx, item.sound_path, item.effect);
+        if (item.delete_after) std.fs.cwd().deleteFile(item.sound_path) catch {};
+        ctx.allocator.free(item.sound_path);
+    }
+}
+
+fn playOne(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) void {
+    const effect_label: []const u8 = switch (effect) {
+        .none => "",
+        .slow => " (slowed + pitched down)",
+        .fast => " (sped up + pitched up)",
+    };
+    std.debug.print("[soundbot] playing {s}{s}\n", .{ sound_path, effect_label });
+
+    runCmd(ctx.allocator, &.{ "xdotool", "keydown", ctx.ptt_key }) catch |err| {
+        std.debug.print("[soundbot] keydown failed: {}\n", .{err});
+    };
+    // Short margin so the PTT key has registered before audio starts - shrunk from
+    // an earlier, more conservative 200ms. If you ever see the very start of a clip
+    // clipped, bump this back up; if not, it can likely go even lower than this.
+    std.time.sleep(50 * std.time.ns_per_ms);
+
+    playFile(ctx, sound_path, effect) catch |err| {
+        std.debug.print("[soundbot] playback failed: {}\n", .{err});
+    };
+
+    std.time.sleep(50 * std.time.ns_per_ms);
+    runCmd(ctx.allocator, &.{ "xdotool", "keyup", ctx.ptt_key }) catch |err| {
+        std.debug.print("[soundbot] keyup failed: {}\n", .{err});
+    };
+}
+
+// asetrate needs a literal numeric sample rate, not an expression (confirmed
+// the hard way - "sample_rate" is not a recognized constant in its eval
+// context). This gets the input file's actual rate via ffprobe so the pitch
+// shift's math is correct regardless of what rate any given file happens to
+// be at, rather than assuming a fixed value.
+fn probeSampleRate(allocator: std.mem.Allocator, sound_path: []const u8) !u32 {
+    var child = std.process.Child.init(&.{
+        "ffprobe", "-v",              "error",
+        "-select_streams", "a:0",
+        "-show_entries", "stream=sample_rate",
+        "-of", "csv=p=0",
+        sound_path,
+    }, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+
+    try child.spawn();
+    const stdout = child.stdout.?;
+    var buf: [32]u8 = undefined;
+    const n = try stdout.readAll(&buf);
+    _ = child.wait() catch {};
+
+    const trimmed = std.mem.trim(u8, buf[0..n], " \r\n\t");
+    return std.fmt.parseInt(u32, trimmed, 10) catch 48000;
+}
+
+pub fn runAndTrack(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    var child = std.process.Child.init(argv, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Inherit;
+
+    try child.spawn();
+    current_pid.store(@intCast(child.id), .release);
+    // If a stop command killed it, this just returns (possibly with a non-zero
+    // exit status) instead of erroring - either way the caller still releases
+    // the PTT key regardless of why playback stopped.
+    _ = child.wait() catch {};
+    current_pid.store(-1, .release);
+}
+
+fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) !void {
+    // No effect: same lightweight, format-specific fast paths as before.
+    if (effect == .none) {
+        if (std.mem.endsWith(u8, sound_path, ".wav")) {
+            return runAndTrack(ctx.allocator, &.{ "paplay", "--device", ctx.sink, sound_path });
+        }
+        if (std.mem.endsWith(u8, sound_path, ".mp3")) {
+            return runAndTrack(ctx.allocator, &.{ "mpg123", "-q", "-o", "pulse", "-a", ctx.sink, sound_path });
+        }
+        return runAndTrack(ctx.allocator, &.{ "ffmpeg", "-nostdin", "-loglevel", "error", "-i", sound_path, "-f", "pulse", ctx.sink });
+    }
+
+    // An effect is active: transcode to a temp WAV file first (plain file I/O,
+    // no live-device timing involved at all), then play that file through the
+    // same paplay path already proven reliable. ffmpeg writing the atempo'd
+    // audio straight to the live pulse sink was the actual bug behind sped-up
+    // clips sometimes not being audible: it can exit right after handing off
+    // the last chunk, before PulseAudio has actually finished draining it.
+    // Slowed clips take long enough to write that this mostly went unnoticed;
+    // sped-up ones finish writing fast enough to exit before anything plays.
+    const factor: f64 = switch (effect) {
+        .none => unreachable,
+        .slow => getEffectSettings().slow_factor,
+        .fast => getEffectSettings().fast_factor,
+    };
+
+    // Combined pitch + speed change, tied together via the same factor - like a
+    // record played at the wrong speed: asetrate reinterprets the audio at a
+    // scaled sample rate, shifting pitch and tempo together. asetrate needs a
+    // literal number here, not an expression, so the file's actual rate is
+    // probed first rather than assumed.
+    const original_rate = probeSampleRate(ctx.allocator, sound_path) catch 48000;
+    const new_rate: f64 = @as(f64, @floatFromInt(original_rate)) * factor;
+
+    var filter_buf: [64]u8 = undefined;
+    const filter_arg = try std.fmt.bufPrint(
+        &filter_buf,
+        "asetrate={d:.0},aresample={d}",
+        .{ new_rate, original_rate },
+    );
+
+    const tmp_path = try std.fmt.allocPrint(ctx.allocator, "/tmp/soundbot_effect_{d}.wav", .{std.time.milliTimestamp()});
+    defer ctx.allocator.free(tmp_path);
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    try runAndTrack(ctx.allocator, &.{
+        "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+        "-i",     sound_path,
+        "-filter:a", filter_arg,
+        tmp_path,
+    });
+
+    try runAndTrack(ctx.allocator, &.{ "paplay", "--device", ctx.sink, tmp_path });
+}
+
+pub fn triggerSound(allocator: std.mem.Allocator, sounds_dir: []const u8, name: []const u8) !void {
+    if (try sounds.findSoundFile(allocator, sounds_dir, name)) |path| {
+        try enqueueSound(path, false);
+        return;
+    }
+
+    if (try sounds.findSoundFileFamily(allocator, sounds_dir, name)) |path| {
+        try enqueueSound(path, false);
+        return;
+    }
+
+    std.debug.print("[soundbot] no sound file found for !{s}\n", .{name});
+}
