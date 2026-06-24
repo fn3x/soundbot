@@ -24,7 +24,7 @@ RUN /opt/zig/zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSafe
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    xvfb x11vnc \
+    xvfb x11vnc x11-utils \
     pulseaudio pulseaudio-utils libasound2-plugins alsa-utils \
     ffmpeg xdotool mpg123 \
     openssh-client sshpass \
@@ -33,6 +33,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libatk1.0-0 libatk-bridge2.0-0 libcups2 libatspi2.0-0 \
     libxcomposite1 \
     && rm -rf /var/lib/apt/lists/*
+
+# PulseAudio actively refuses to run as root (by design - it's meant to be a
+# per-user session daemon), so the whole container runs as a real unprivileged
+# user instead of relying on a flag/workaround.
+RUN useradd --create-home --shell /bin/bash appuser
 
 WORKDIR /opt/soundbot
 
@@ -46,7 +51,15 @@ RUN chmod +x ./soundbot
 # never commit/publish it). These mkdirs just give the entrypoint stable mount points.
 RUN mkdir -p ./sounds ./teamspeak-client
 
+# Pre-create the TS6 client's profile dir with the right ownership *before* a
+# volume ever gets mounted there - Docker copies a fresh named volume's initial
+# permissions from whatever already exists in the image at that path, so this
+# is what makes the persisted profile actually writable by appuser later.
+RUN mkdir -p /home/appuser/.cache/TeamSpeak \
+    && chown -R appuser:appuser /home/appuser /opt/soundbot
+
 COPY scripts/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+USER appuser
 ENTRYPOINT ["/entrypoint.sh"]

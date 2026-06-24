@@ -6,7 +6,13 @@ SINK_NAME="${TS_SINK:-ts_bot_sink}"
 
 echo "[entrypoint] starting Xvfb on $DISPLAY"
 Xvfb "$DISPLAY" -screen 0 1024x768x24 &
-sleep 1
+for i in $(seq 1 20); do
+    if xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
+        echo "[entrypoint] Xvfb is ready"
+        break
+    fi
+    sleep 0.5
+done
 
 echo "[entrypoint] starting x11vnc (for one-time manual setup / occasional debugging)"
 x11vnc -display "$DISPLAY" -nopw -listen 0.0.0.0 -xkb -forever -shared &

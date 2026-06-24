@@ -26,7 +26,7 @@ services:
       # Persists the TS6 client's profile (server bookmark, identity, selected
       # audio device) across container restarts - without this you'd have to
       # redo the one-time manual VNC setup every single time the container restarts.
-      - soundbot-ts-profile:/root/.cache/TeamSpeak
+      - soundbot-ts-profile:./.cache/TeamSpeak
     ports:
       # VNC - only needed for the initial manual setup (and occasional debugging).
       # Consider removing this once everything's confirmed working, or at least
