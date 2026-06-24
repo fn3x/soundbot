@@ -145,6 +145,51 @@ fn findSoundFile(allocator: std.mem.Allocator, dir_path: []const u8, name: []con
     return null;
 }
 
+// Fallback for when findSoundFile finds no exact match: looks for "<name><digits>.<ext>"
+// (du1.mp3, du2.mp3, ...) and picks one at random. Only reached when the exact name
+// didn't match anything, so "!du1" - which DOES match du1.mp3 exactly above - never
+// falls through to here; "!du" with no du.* file does, and lands on one of its
+// numbered siblings.
+fn findSoundFileFamily(allocator: std.mem.Allocator, dir_path: []const u8, name: []const u8) !?[]const u8 {
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| {
+        std.debug.print("Could not open sounds dir '{s}': {}\n", .{ dir_path, err });
+        return null;
+    };
+    defer dir.close();
+
+    var matches = std.ArrayList([]const u8).init(allocator);
+    defer {
+        for (matches.items) |m| allocator.free(m);
+        matches.deinit();
+    }
+
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.startsWith(u8, entry.name, name)) continue;
+
+        // Everything between the name and the extension's dot must be all digits.
+        const rest = entry.name[name.len..];
+        const dot_index = std.mem.indexOfScalar(u8, rest, '.') orelse continue;
+        const digits_part = rest[0..dot_index];
+        if (digits_part.len == 0) continue;
+        var all_digits = true;
+        for (digits_part) |c| {
+            if (!std.ascii.isDigit(c)) {
+                all_digits = false;
+                break;
+            }
+        }
+        if (!all_digits) continue;
+
+        try matches.append(try std.fs.path.join(allocator, &.{ dir_path, entry.name }));
+    }
+
+    if (matches.items.len == 0) return null;
+    const idx = std.crypto.random.intRangeLessThan(usize, 0, matches.items.len);
+    return try allocator.dupe(u8, matches.items[idx]);
+}
+
 // ---- Playback queue: one persistent player thread plays sounds back-to-back ----
 // (replaces the old "single playing flag + detached thread per trigger" approach,
 // which dropped triggers instead of queueing them)
@@ -277,40 +322,8 @@ fn playOne(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) void {
     };
 }
 
-fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) !void {
-    var argv = std.ArrayList([]const u8).init(ctx.allocator);
-    defer argv.deinit();
-
-    // Buffer for the "atempo=X.XXX" filter string - lives for this whole function,
-    // which is fine since the spawn+wait below happens before it'd go out of scope.
-    var filter_buf: [64]u8 = undefined;
-
-    // Files with no active effect skip ffmpeg in favor of a lighter, format-specific
-    // player: paplay for .wav, mpg123 for .mp3. Both are far lighter than ffmpeg's
-    // general-purpose format probing/codec loading, so they start noticeably faster.
-    // Anything with an active effect needs ffmpeg's atempo filter though, and anything
-    // else not .wav/.mp3 falls through to ffmpeg too.
-    if (effect == .none and std.mem.endsWith(u8, sound_path, ".wav")) {
-        try argv.appendSlice(&.{ "paplay", "--device", ctx.sink, sound_path });
-    } else if (effect == .none and std.mem.endsWith(u8, sound_path, ".mp3")) {
-        try argv.appendSlice(&.{ "mpg123", "-q", "-o", "pulse", "-a", ctx.sink, sound_path });
-    } else {
-        try argv.appendSlice(&.{ "ffmpeg", "-nostdin", "-loglevel", "error", "-i", sound_path });
-        if (effect != .none) {
-            const factor: f64 = switch (effect) {
-                .none => unreachable,
-                .slow => getEffectSettings().slow_factor,
-                .fast => getEffectSettings().fast_factor,
-            };
-            // atempo only supports 0.5-2.0 in a single filter instance - chain multiple
-            // atempo filters if you ever need a more extreme factor than that.
-            const filter_arg = try std.fmt.bufPrint(&filter_buf, "atempo={d:.3}", .{factor});
-            try argv.appendSlice(&.{ "-filter:a", filter_arg });
-        }
-        try argv.appendSlice(&.{ "-f", "pulse", ctx.sink });
-    }
-
-    var child = std.process.Child.init(argv.items, ctx.allocator);
+fn runAndTrack(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    var child = std.process.Child.init(argv, allocator);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Inherit;
@@ -324,13 +337,62 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) !void
     current_pid.store(-1, .release);
 }
 
-fn triggerSound(allocator: std.mem.Allocator, cfg: *const Config, name: []const u8) !void {
-    const maybe_path = try findSoundFile(allocator, cfg.sounds_dir, name);
-    const path = maybe_path orelse {
-        std.debug.print("[soundbot] no sound file found for !{s}\n", .{name});
-        return;
+fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) !void {
+    // No effect: same lightweight, format-specific fast paths as before.
+    if (effect == .none) {
+        if (std.mem.endsWith(u8, sound_path, ".wav")) {
+            return runAndTrack(ctx.allocator, &.{ "paplay", "--device", ctx.sink, sound_path });
+        }
+        if (std.mem.endsWith(u8, sound_path, ".mp3")) {
+            return runAndTrack(ctx.allocator, &.{ "mpg123", "-q", "-o", "pulse", "-a", ctx.sink, sound_path });
+        }
+        return runAndTrack(ctx.allocator, &.{ "ffmpeg", "-nostdin", "-loglevel", "error", "-i", sound_path, "-f", "pulse", ctx.sink });
+    }
+
+    // An effect is active: transcode to a temp WAV file first (plain file I/O,
+    // no live-device timing involved at all), then play that file through the
+    // same paplay path already proven reliable. ffmpeg writing the atempo'd
+    // audio straight to the live pulse sink was the actual bug behind sped-up
+    // clips sometimes not being audible: it can exit right after handing off
+    // the last chunk, before PulseAudio has actually finished draining it.
+    // Slowed clips take long enough to write that this mostly went unnoticed;
+    // sped-up ones finish writing fast enough to exit before anything plays.
+    const factor: f64 = switch (effect) {
+        .none => unreachable,
+        .slow => getEffectSettings().slow_factor,
+        .fast => getEffectSettings().fast_factor,
     };
-    try enqueueSound(path);
+    var filter_buf: [64]u8 = undefined;
+    // atempo only supports 0.5-2.0 in a single filter instance - chain multiple
+    // atempo filters if you ever need a more extreme factor than that.
+    const filter_arg = try std.fmt.bufPrint(&filter_buf, "atempo={d:.3}", .{factor});
+
+    const tmp_path = try std.fmt.allocPrint(ctx.allocator, "/tmp/soundbot_effect_{d}.wav", .{std.time.milliTimestamp()});
+    defer ctx.allocator.free(tmp_path);
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    try runAndTrack(ctx.allocator, &.{
+        "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+        "-i",     sound_path,
+        "-filter:a", filter_arg,
+        tmp_path,
+    });
+
+    try runAndTrack(ctx.allocator, &.{ "paplay", "--device", ctx.sink, tmp_path });
+}
+
+fn triggerSound(allocator: std.mem.Allocator, cfg: *const Config, name: []const u8) !void {
+    if (try findSoundFile(allocator, cfg.sounds_dir, name)) |path| {
+        try enqueueSound(path);
+        return;
+    }
+
+    if (try findSoundFileFamily(allocator, cfg.sounds_dir, name)) |path| {
+        try enqueueSound(path);
+        return;
+    }
+
+    std.debug.print("[soundbot] no sound file found for !{s}\n", .{name});
 }
 
 // ---- ServerQuery helpers: send a command, read lines until "error id=" terminator ----
