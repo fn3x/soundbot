@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pulseaudio pulseaudio-utils libasound2-plugins alsa-utils \
     ffmpeg xdotool mpg123 sox libsox-fmt-all \
     openssh-client sshpass \
-    ca-certificates util-linux awscli \
+    ca-certificates curl util-linux awscli \
     libnotify4 libatomic1 libnspr4 libnss3 \
     libatk1.0-0 libatk-bridge2.0-0 libcups2 libatspi2.0-0 \
     libxcomposite1 \
@@ -50,6 +50,14 @@ RUN chmod +x ./soundbot
 # because of licensing (get it from teamspeak.com yourself, not a mirror, and
 # never commit/publish it). These mkdirs just give the entrypoint stable mount points.
 RUN mkdir -p ./sounds ./teamspeak-client
+
+# Standalone binary, not the apt package - distro packages of yt-dlp
+# consistently lag behind YouTube's own site changes, and the project's own
+# docs recommend this exact approach for that reason. It's a self-contained
+# executable (bundles its own Python interpreter), so no separate python3
+# install is needed - it just needs ffmpeg on PATH, which is already installed.
+RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
+    && chmod a+rx /usr/local/bin/yt-dlp
 
 # Right ownership on appuser's home dir *before* a volume ever gets mounted
 # there - Docker copies a fresh named volume's initial permissions from

@@ -5,6 +5,7 @@ const sounds = @import("sounds.zig");
 const query = @import("query.zig");
 const playback = @import("playback.zig");
 const tts = @import("tts.zig");
+const youtube = @import("youtube.zig");
 
 const Config = config_mod.Config;
 
@@ -196,6 +197,31 @@ pub fn main() !void {
             const text = std.mem.trim(u8, after_bang[name_end..], " \t");
             const voice_id = tts.tts_voices[std.crypto.random.intRangeLessThan(usize, 0, tts.tts_voices.len)].voice_id;
             tts.handleTtsCommand(allocator, voice_id, null, text);
+            continue;
+        }
+
+        if (std.mem.eql(u8, name, "yt")) {
+            const yt_query = std.mem.trim(u8, after_bang[name_end..], " \t");
+            youtube.handleYtCommand(allocator, yt_query);
+            continue;
+        }
+
+        if (std.mem.eql(u8, name, "ytlength")) {
+            const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
+            const seconds = std.fmt.parseInt(u32, rest, 10) catch {
+                std.debug.print("[soundbot] !ytlength needs a whole number of seconds (0 for no cap), e.g. !ytlength 30\n", .{});
+                continue;
+            };
+            if (seconds != 0 and (seconds < 5 or seconds > 3600)) {
+                std.debug.print("[soundbot] !ytlength should be 0 (no cap) or 5-3600 seconds, got {d}\n", .{seconds});
+                continue;
+            }
+            youtube.setMaxSeconds(seconds);
+            if (seconds == 0) {
+                std.debug.print("[soundbot] yt length cap removed - full tracks will play\n", .{});
+            } else {
+                std.debug.print("[soundbot] yt clip length capped at {d}s\n", .{seconds});
+            }
             continue;
         }
 
