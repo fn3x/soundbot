@@ -607,7 +607,7 @@ fn buildVoicesList(allocator: std.mem.Allocator) ![]u8 {
     for (tts_voices) |v| {
         try out.appendSlice("* !");
         try out.appendSlice(v.cmd);
-        try out.appendSlice(" -");
+        try out.appendSlice(" - ");
         try out.appendSlice(v.voice_id);
         try out.appendSlice(" (");
         try out.appendSlice(v.language);
