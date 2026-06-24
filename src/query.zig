@@ -73,6 +73,19 @@ pub fn sendReply(allocator: std.mem.Allocator, stdin: std.fs.File, reader: anyty
     try doCommand(allocator, stdin, reader, "sendtextmessage", "sendtextmessage targetmode={s} target={s} msg={s}", .{ targetmode, target, escaped });
 }
 
+// Convenience wrapper around sendReply for command-confirmation/error messages:
+// pulls targetmode/target from the triggering notification line itself (same
+// as sendReply expects), and catches its own errors so call sites - of which
+// there are many, for every settings command - don't each need their own
+// try/catch boilerplate just to talk back in chat.
+pub fn replyToTrigger(allocator: std.mem.Allocator, stdin: std.fs.File, reader: anytype, trimmed_line: []const u8, default_target: []const u8, message: []const u8) void {
+    const targetmode = ts_protocol.extractField(trimmed_line, "targetmode=") orelse "2";
+    const target = ts_protocol.extractField(trimmed_line, "target=") orelse default_target;
+    sendReply(allocator, stdin, reader, targetmode, target, message) catch |err| {
+        std.debug.print("[soundbot] failed to send reply: {}\n", .{err});
+    };
+}
+
 // clientlist responses pack multiple clients into one line, separated by '|' -
 // e.g. "clid=1 cid=2 client_nickname=Foo|clid=3 cid=4 client_nickname=Bar".
 // Split on '|' first to get clean per-client records before pulling fields out.

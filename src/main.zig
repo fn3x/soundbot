@@ -9,6 +9,30 @@ const youtube = @import("youtube.zig");
 
 const Config = config_mod.Config;
 
+const help_text =
+    \\Commands:
+    \\
+    \\* !<name> - play a sound (see !sounds for the list)
+    \\* !stop - clear the queue, stop current playback
+    \\* !sounds - list available sound triggers
+    \\* !voices - list available TTS voices
+    \\* !ttsg/!ttsb/!ttsjo/!ttsma/!ttssa/!ttsam/!ttsem/!ttsju/!ttsni/!ttsca/!ttsm/!ttst <text> - text-to-speech (see !voices)
+    \\* !tts <text> - text-to-speech, random voice
+    \\* !yt <url or search> - play audio from YouTube (or anywhere yt-dlp supports)
+    \\* !ytlength <seconds> - cap yt clip length (0 = no cap)
+    \\* !join [channel_id] - move the bot here (or to a specific channel)
+    \\* !chance <0-100> - % chance a sound gets pitch+speed shifted
+    \\* !slow / !fast <0.5-2.0> - how much, when it does
+    \\* !chancereverb <0-100> - % chance a sound gets reverb (independent of !chance)
+    \\* !reverbamount <0-100> - how much reverb, when it does
+    \\* !help - this message
+;
+
+// ---- Clean shutdown: send "quit" to the ServerQuery session instead of just dying ----
+// Without this, Ctrl+C (or any kill) just severs the pipe, leaving a half-closed
+// session server-side that can cause the *next* launch to fail (stale session /
+// anti-flood heuristics tripping on a rapid reconnect from the same IP).
+
 var g_ssh_stdin: ?std.fs.File = null;
 
 fn handleShutdownSignal(_: c_int) callconv(.C) void {
@@ -150,8 +174,15 @@ pub fn main() !void {
         }
         if (!name_is_safe) continue;
 
+        if (std.mem.eql(u8, name, "help")) {
+            query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, help_text);
+            continue;
+        }
+
         if (std.mem.eql(u8, name, "stop")) {
             playback.clearQueueAndStopCurrent(allocator);
+            std.debug.print("[soundbot] Queue cleared, playback stopped.\n", .{});
+            query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "Queue cleared, playback stopped.");
             continue;
         }
 
@@ -210,17 +241,24 @@ pub fn main() !void {
             const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
             const seconds = std.fmt.parseInt(u32, rest, 10) catch {
                 std.debug.print("[soundbot] !ytlength needs a whole number of seconds (0 for no cap), e.g. !ytlength 30\n", .{});
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "!ytlength needs a whole number of seconds (0 for no cap), e.g. !ytlength 30");
                 continue;
             };
             if (seconds != 0 and (seconds < 5 or seconds > 3600)) {
                 std.debug.print("[soundbot] !ytlength should be 0 (no cap) or 5-3600 seconds, got {d}\n", .{seconds});
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "!ytlength should be 0 (no cap) or 5-3600 seconds");
                 continue;
             }
             youtube.setMaxSeconds(seconds);
             if (seconds == 0) {
                 std.debug.print("[soundbot] yt length cap removed - full tracks will play\n", .{});
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "yt length cap removed - full tracks will play");
             } else {
                 std.debug.print("[soundbot] yt clip length capped at {d}s\n", .{seconds});
+
+                var buf: [64]u8 = undefined;
+                const ok_msg = std.fmt.bufPrint(&buf, "yt clip length capped at {d} seconds", .{seconds}) catch "yt clip length capped";
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, ok_msg);
             }
             continue;
         }
@@ -228,75 +266,95 @@ pub fn main() !void {
         if (std.mem.eql(u8, name, "chance")) {
             const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
             const percent = std.fmt.parseInt(u32, rest, 10) catch {
-                std.debug.print("[soundbot] !chance needs a whole number 0-100, e.g. !chance 10\n", .{});
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "!chance needs a whole number 0-100, e.g. !chance 10");
                 continue;
             };
             if (percent > 100) {
-                std.debug.print("[soundbot] !chance must be 0-100, got {d}\n", .{percent});
+                var buf: [64]u8 = undefined;
+                const err_msg = std.fmt.bufPrint(&buf, "!chance must be 0-100, got {d}", .{percent}) catch "!chance must be 0-100";
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, err_msg);
                 continue;
             }
             playback.setEffectChance(percent);
-            std.debug.print("[soundbot] effect chance set to {d}%\n", .{percent});
+            var buf: [64]u8 = undefined;
+            const ok_msg = std.fmt.bufPrint(&buf, "Effect chance set to {d}%", .{percent}) catch "Effect chance updated";
+            query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, ok_msg);
             continue;
         }
 
         if (std.mem.eql(u8, name, "slow")) {
             const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
             const factor = std.fmt.parseFloat(f64, rest) catch {
-                std.debug.print("[soundbot] !slow needs a number, e.g. !slow 0.7\n", .{});
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "!slow needs a number, e.g. !slow 0.7");
                 continue;
             };
             if (factor < 0.5 or factor > 2.0) {
-                std.debug.print("[soundbot] !slow should be 0.5-2.0 (outside that it stops sounding like a usable effect), got {d}\n", .{factor});
+                var buf: [96]u8 = undefined;
+                const err_msg = std.fmt.bufPrint(&buf, "!slow should be 0.5-2.0 (outside that it stops sounding like a usable effect), got {d}", .{factor}) catch "!slow should be 0.5-2.0";
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, err_msg);
                 continue;
             }
             playback.setEffectSlow(factor);
-            std.debug.print("[soundbot] slow+pitch-down factor set to {d}x\n", .{factor});
+            var buf: [64]u8 = undefined;
+            const ok_msg = std.fmt.bufPrint(&buf, "Slow+pitch-down factor set to {d}x", .{factor}) catch "Slow factor updated";
+            query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, ok_msg);
             continue;
         }
 
         if (std.mem.eql(u8, name, "fast")) {
             const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
             const factor = std.fmt.parseFloat(f64, rest) catch {
-                std.debug.print("[soundbot] !fast needs a number, e.g. !fast 1.3\n", .{});
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "!fast needs a number, e.g. !fast 1.3");
                 continue;
             };
             if (factor < 0.5 or factor > 2.0) {
-                std.debug.print("[soundbot] !fast should be 0.5-2.0 (outside that it stops sounding like a usable effect), got {d}\n", .{factor});
+                var buf: [96]u8 = undefined;
+                const err_msg = std.fmt.bufPrint(&buf, "!fast should be 0.5-2.0 (outside that it stops sounding like a usable effect), got {d}", .{factor}) catch "!fast should be 0.5-2.0";
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, err_msg);
                 continue;
             }
             playback.setEffectFast(factor);
-            std.debug.print("[soundbot] fast+pitch-up factor set to {d}x\n", .{factor});
+            var buf: [64]u8 = undefined;
+            const ok_msg = std.fmt.bufPrint(&buf, "Fast+pitch-up factor set to {d}x", .{factor}) catch "Fast factor updated";
+            query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, ok_msg);
             continue;
         }
 
         if (std.mem.eql(u8, name, "chancereverb")) {
             const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
             const percent = std.fmt.parseInt(u32, rest, 10) catch {
-                std.debug.print("[soundbot] !chancereverb needs a whole number 0-100, e.g. !chancereverb 10\n", .{});
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "!chancereverb needs a whole number 0-100, e.g. !chancereverb 10");
                 continue;
             };
             if (percent > 100) {
-                std.debug.print("[soundbot] !chancereverb must be 0-100, got {d}\n", .{percent});
+                var buf: [64]u8 = undefined;
+                const err_msg = std.fmt.bufPrint(&buf, "!chancereverb must be 0-100, got {d}", .{percent}) catch "!chancereverb must be 0-100";
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, err_msg);
                 continue;
             }
             playback.setReverbChance(percent);
-            std.debug.print("[soundbot] reverb chance set to {d}% (independent of !chance)\n", .{percent});
+            var buf: [96]u8 = undefined;
+            const ok_msg = std.fmt.bufPrint(&buf, "Reverb chance set to {d}% (independent of !chance)", .{percent}) catch "Reverb chance updated";
+            query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, ok_msg);
             continue;
         }
 
         if (std.mem.eql(u8, name, "reverbamount")) {
             const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
             const amount = std.fmt.parseInt(u32, rest, 10) catch {
-                std.debug.print("[soundbot] !reverbamount needs a whole number 0-100, e.g. !reverbamount 50\n", .{});
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "!reverbamount needs a whole number 0-100, e.g. !reverbamount 50");
                 continue;
             };
             if (amount > 100) {
-                std.debug.print("[soundbot] !reverbamount must be 0-100, got {d}\n", .{amount});
+                var buf: [64]u8 = undefined;
+                const err_msg = std.fmt.bufPrint(&buf, "!reverbamount must be 0-100, got {d}", .{amount}) catch "!reverbamount must be 0-100";
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, err_msg);
                 continue;
             }
             playback.setReverbAmount(amount);
-            std.debug.print("[soundbot] reverb amount set to {d}\n", .{amount});
+            var buf: [64]u8 = undefined;
+            const ok_msg = std.fmt.bufPrint(&buf, "Reverb amount set to {d}", .{amount}) catch "Reverb amount updated";
+            query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, ok_msg);
             continue;
         }
 
