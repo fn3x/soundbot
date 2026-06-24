@@ -111,6 +111,26 @@ fn unescapeTs(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return out.toOwnedSlice();
 }
 
+// ---- Reverse direction - needed now that the bot replies in chat itself ----
+
+fn escapeTs(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+    for (input) |c| {
+        switch (c) {
+            ' ' => try out.appendSlice("\\s"),
+            '|' => try out.appendSlice("\\p"),
+            '/' => try out.appendSlice("\\/"),
+            '\\' => try out.appendSlice("\\\\"),
+            '\n' => try out.appendSlice("\\n"),
+            '\r' => try out.appendSlice("\\r"),
+            '\t' => try out.appendSlice("\\t"),
+            else => try out.append(c),
+        }
+    }
+    return out.toOwnedSlice();
+}
+
 // ---- Pull a "key=value" token's value out of a space-delimited ServerQuery line ----
 
 fn extractField(line: []const u8, key: []const u8) ?[]const u8 {
@@ -188,6 +208,68 @@ fn findSoundFileFamily(allocator: std.mem.Allocator, dir_path: []const u8, name:
     if (matches.items.len == 0) return null;
     const idx = std.crypto.random.intRangeLessThan(usize, 0, matches.items.len);
     return try allocator.dupe(u8, matches.items[idx]);
+}
+
+fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+// Builds the !sounds reply text: every file's own trigger name (sound1.mp3 -> !sound1),
+// plus - for any file with a numeric suffix - the shared family trigger too
+// (sound1.mp3 + sound2.mp3 -> also !sound), since findSoundFileFamily would
+// actually answer to that name too.
+fn buildSoundsList(allocator: std.mem.Allocator, sounds_dir: []const u8) ![]u8 {
+    var dir = try std.fs.cwd().openDir(sounds_dir, .{ .iterate = true });
+    defer dir.close();
+
+    var names = std.StringHashMap(void).init(allocator);
+    defer {
+        var kit = names.keyIterator();
+        while (kit.next()) |k| allocator.free(k.*);
+        names.deinit();
+    }
+
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind != .file) continue;
+        const dot = std.mem.indexOfScalar(u8, entry.name, '.') orelse continue;
+        const base = entry.name[0..dot];
+        if (base.len == 0) continue;
+
+        if (!names.contains(base)) {
+            try names.put(try allocator.dupe(u8, base), {});
+        }
+
+        // Trailing digits -> the family prefix is also a valid trigger.
+        var digit_start: usize = base.len;
+        while (digit_start > 0 and std.ascii.isDigit(base[digit_start - 1])) digit_start -= 1;
+        if (digit_start < base.len and digit_start > 0) {
+            const family = base[0..digit_start];
+            if (!names.contains(family)) {
+                try names.put(try allocator.dupe(u8, family), {});
+            }
+        }
+    }
+
+    var list = std.ArrayList([]const u8).init(allocator);
+    defer list.deinit();
+    var kit = names.keyIterator();
+    while (kit.next()) |k| try list.append(k.*);
+    std.mem.sort([]const u8, list.items, {}, lessThanStr);
+
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+    if (list.items.len == 0) {
+        try out.appendSlice("No sounds available.");
+    } else {
+        try out.appendSlice("Available sounds:");
+        for (list.items) |n| {
+            try out.append(' ');
+            try out.append('!');
+            try out.appendSlice(n);
+        }
+    }
+    return out.toOwnedSlice();
 }
 
 // ---- Playback queue: one persistent player thread plays sounds back-to-back ----
@@ -457,6 +539,16 @@ fn freeLines(allocator: std.mem.Allocator, lines: *std.ArrayList([]u8)) void {
     lines.deinit();
 }
 
+// Replies in chat - reuses the SAME targetmode/target the triggering message
+// arrived on, so a reply to a channel message goes back to that channel, and a
+// reply to a server-wide chat message goes back to server-wide chat, with no
+// extra lookup needed either way.
+fn sendReply(allocator: std.mem.Allocator, stdin: std.fs.File, reader: anytype, targetmode: []const u8, target: []const u8, message: []const u8) !void {
+    const escaped = try escapeTs(allocator, message);
+    defer allocator.free(escaped);
+    try doCommand(allocator, stdin, reader, "sendtextmessage", "sendtextmessage targetmode={s} target={s} msg={s}", .{ targetmode, target, escaped });
+}
+
 // clientlist responses pack multiple clients into one line, separated by '|' -
 // e.g. "clid=1 cid=2 client_nickname=Foo|clid=3 cid=4 client_nickname=Bar".
 // Split on '|' first to get clean per-client records before pulling fields out.
@@ -620,6 +712,22 @@ pub fn main() !void {
 
         if (std.mem.eql(u8, name, "stop")) {
             clearQueueAndStopCurrent(allocator);
+            continue;
+        }
+
+        if (std.mem.eql(u8, name, "sounds")) {
+            const list_msg = buildSoundsList(allocator, cfg.sounds_dir) catch |err| {
+                std.debug.print("[soundbot] failed to build sounds list: {}\n", .{err});
+                continue;
+            };
+            defer allocator.free(list_msg);
+
+            const reply_targetmode = extractField(trimmed, "targetmode=") orelse "2";
+            const reply_target = extractField(trimmed, "target=") orelse cfg.channel_id;
+
+            sendReply(allocator, stdin, reader, reply_targetmode, reply_target, list_msg) catch |err| {
+                std.debug.print("[soundbot] failed to send sounds list: {}\n", .{err});
+            };
             continue;
         }
 
