@@ -28,6 +28,15 @@ sleep 1
 pactl load-module module-null-sink sink_name="$SINK_NAME" sink_properties=device.description="$SINK_NAME" 2>/dev/null || true
 pactl set-default-source "${SINK_NAME}.monitor"
 
+# A second, separate sink purely for the TS6 client's own *output* (what it
+# plays back from other speakers in the channel). Without this, the client's
+# output defaults to the only sink that exists - the same one used as its mic
+# input - creating a feedback loop: anything it hears gets played into that
+# sink, immediately recaptured by the mic, and retransmitted whenever the bot's
+# PTT happens to be open (i.e., while playing a sound).
+pactl load-module module-null-sink sink_name="${SINK_NAME}_output" sink_properties=device.description="${SINK_NAME}_output" 2>/dev/null || true
+pactl set-default-sink "${SINK_NAME}_output"
+
 echo "[entrypoint] launching TS6 client"
 cd /opt/soundbot/teamspeak-client
 if [ ! -x ./TeamSpeak ]; then
