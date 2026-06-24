@@ -10,4 +10,12 @@ set -e
 # TS6 profile - hence having to log in again after every redeploy.
 chown -R appuser:appuser /home/appuser
 
+# setpriv changes the effective UID/GID but does NOT update these to match -
+# without this, PulseAudio, the TS6 client's own profile-path detection, and
+# anything else that derives its config/data location from $HOME would still
+# think it's /root, which appuser has no permission to read or write.
+export HOME=/home/appuser
+export USER=appuser
+export LOGNAME=appuser
+
 exec setpriv --reuid=appuser --regid=appuser --init-groups /entrypoint-inner.sh
