@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pulseaudio pulseaudio-utils libasound2-plugins alsa-utils \
     ffmpeg xdotool mpg123 \
     openssh-client sshpass \
-    ca-certificates \
+    ca-certificates util-linux \
     libnotify4 libatomic1 libnspr4 libnss3 \
     libatk1.0-0 libatk-bridge2.0-0 libcups2 libatspi2.0-0 \
     libxcomposite1 \
@@ -64,7 +64,7 @@ RUN mkdir -p /home/appuser/.cache/TeamSpeak \
 RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
 
 COPY scripts/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY scripts/entrypoint-inner.sh /entrypoint-inner.sh
+RUN chmod +x /entrypoint.sh /entrypoint-inner.sh
 
-USER appuser
 ENTRYPOINT ["/entrypoint.sh"]
