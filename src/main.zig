@@ -575,21 +575,22 @@ const max_tts_chars = 150;
 const TtsVoice = struct {
     cmd: []const u8,
     voice_id: []const u8,
+    language: []const u8,
 };
 
 const tts_voices = [_]TtsVoice{
-    .{ .cmd = "ttsg", .voice_id = "Giorgio" }, // Italian
-    .{ .cmd = "ttsb", .voice_id = "Brian" }, // British English
-    .{ .cmd = "ttsjo", .voice_id = "Joanna" }, // US English
-    .{ .cmd = "ttsma", .voice_id = "Matthew" }, // US English
-    .{ .cmd = "ttssa", .voice_id = "Salli" }, // US English
-    .{ .cmd = "ttsam", .voice_id = "Amy" }, // British English
-    .{ .cmd = "ttsem", .voice_id = "Emma" }, // British English
-    .{ .cmd = "ttsju", .voice_id = "Justin" }, // US English
-    .{ .cmd = "ttsni", .voice_id = "Nicole" }, // Australian English
-    .{ .cmd = "ttsca", .voice_id = "Carla" }, // Italian
-    .{ .cmd = "ttsm", .voice_id = "Maxim" }, // Russian
-    .{ .cmd = "ttst", .voice_id = "Tatyana" }, // Russian
+    .{ .cmd = "ttsg", .voice_id = "Giorgio", .language = "Italian" },
+    .{ .cmd = "ttsb", .voice_id = "Brian", .language = "British English" },
+    .{ .cmd = "ttsjo", .voice_id = "Joanna", .language = "US English" },
+    .{ .cmd = "ttsma", .voice_id = "Matthew", .language = "US English" },
+    .{ .cmd = "ttssa", .voice_id = "Salli", .language = "US English" },
+    .{ .cmd = "ttsam", .voice_id = "Amy", .language = "British English" },
+    .{ .cmd = "ttsem", .voice_id = "Emma", .language = "British English" },
+    .{ .cmd = "ttsju", .voice_id = "Justin", .language = "US English" },
+    .{ .cmd = "ttsni", .voice_id = "Nicole", .language = "Australian English" },
+    .{ .cmd = "ttsca", .voice_id = "Carla", .language = "Italian" },
+    .{ .cmd = "ttsm", .voice_id = "Maxim", .language = "Russian" },
+    .{ .cmd = "ttst", .voice_id = "Tatyana", .language = "Russian" },
 };
 
 fn findTtsVoice(name: []const u8) ?[]const u8 {
@@ -597,6 +598,23 @@ fn findTtsVoice(name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, name, v.cmd)) return v.voice_id;
     }
     return null;
+}
+
+fn buildVoicesList(allocator: std.mem.Allocator) ![]u8 {
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+    try out.appendSlice("Available voices:\n\n");
+    for (tts_voices) |v| {
+        try out.appendSlice("* !");
+        try out.appendSlice(v.cmd);
+        try out.appendSlice(" -");
+        try out.appendSlice(v.voice_id);
+        try out.appendSlice(" (");
+        try out.appendSlice(v.language);
+        try out.appendSlice(")\n");
+    }
+    try out.appendSlice("* !tts - random voice\n");
+    return out.toOwnedSlice();
 }
 
 fn synthesizeTts(allocator: std.mem.Allocator, voice_id: []const u8, engine: ?[]const u8, text: []const u8, out_path: []const u8) !void {
@@ -894,6 +912,22 @@ pub fn main() !void {
 
             sendReply(allocator, stdin, reader, reply_targetmode, reply_target, list_msg) catch |err| {
                 std.debug.print("[soundbot] failed to send sounds list: {}\n", .{err});
+            };
+            continue;
+        }
+
+        if (std.mem.eql(u8, name, "voices")) {
+            const list_msg = buildVoicesList(allocator) catch |err| {
+                std.debug.print("[soundbot] failed to build voices list: {}\n", .{err});
+                continue;
+            };
+            defer allocator.free(list_msg);
+ 
+            const reply_targetmode = extractField(trimmed, "targetmode=") orelse "2";
+            const reply_target = extractField(trimmed, "target=") orelse cfg.channel_id;
+ 
+            sendReply(allocator, stdin, reader, reply_targetmode, reply_target, list_msg) catch |err| {
+                std.debug.print("[soundbot] failed to send voices list: {}\n", .{err});
             };
             continue;
         }
