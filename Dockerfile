@@ -51,12 +51,13 @@ RUN chmod +x ./soundbot
 # never commit/publish it). These mkdirs just give the entrypoint stable mount points.
 RUN mkdir -p ./sounds ./teamspeak-client
 
-# Pre-create the TS6 client's profile dir with the right ownership *before* a
-# volume ever gets mounted there - Docker copies a fresh named volume's initial
-# permissions from whatever already exists in the image at that path, so this
-# is what makes the persisted profile actually writable by appuser later.
-RUN mkdir -p /home/appuser/.cache/TeamSpeak \
-    && chown -R appuser:appuser /home/appuser /opt/soundbot
+# Right ownership on appuser's home dir *before* a volume ever gets mounted
+# there - Docker copies a fresh named volume's initial permissions from
+# whatever already exists in the image at that path, so this is what makes
+# the persisted profile actually writable by appuser later. (The entrypoint
+# also re-chowns this at container start, since a volume mount overrides
+# whatever's baked in here anyway - this is just the baseline for that.)
+RUN chown -R appuser:appuser /home/appuser /opt/soundbot
 
 # Xvfb normally relies on root to create this socket directory - since the
 # container now runs as a regular user, it has to already exist with the
