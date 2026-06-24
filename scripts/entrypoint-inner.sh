@@ -44,6 +44,18 @@ if [ ! -x ./TeamSpeak ]; then
     echo "[entrypoint] Did you mount your teamspeak-client/ folder into this container? See README."
     exit 1
 fi
+
+# Chromium (which the client's UI is built on) writes a SingletonLock file
+# into its profile dir, encoding the *hostname* of whoever holds it, to stop
+# two instances corrupting the same profile concurrently. Since the profile
+# persists across container recreations but Docker assigns each one a new
+# random hostname, any unclean shutdown of a previous container leaves a lock
+# that looks like it belongs to "another computer" forever after - clearing
+# it defensively here, same as the Xvfb lock cleanup above.
+find "$HOME/.cache/TeamSpeak" -maxdepth 2 \
+    \( -name SingletonLock -o -name SingletonSocket -o -name SingletonCookie \) \
+    -delete 2>/dev/null || true
+
 DISPLAY="$DISPLAY" ./TeamSpeak --no-sandbox &
 sleep 5
 
