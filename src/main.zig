@@ -149,8 +149,11 @@ fn findSoundFile(allocator: std.mem.Allocator, dir_path: []const u8, name: []con
 // (replaces the old "single playing flag + detached thread per trigger" approach,
 // which dropped triggers instead of queueing them)
 
+const Effect = enum { none, slow, fast };
+
 const QueueItem = struct {
     sound_path: []const u8,
+    effect: Effect,
 };
 
 var queue_mutex: std.Thread.Mutex = .{};
@@ -163,6 +166,47 @@ var sound_queue: std.ArrayList(QueueItem) = undefined; // initialized in main()
 // across threads (that would risk two threads both calling wait() on it).
 var current_pid = std.atomic.Value(i32).init(-1);
 
+// Runtime-tunable via !chance / !slow / !fast - not persisted across restarts.
+const EffectSettings = struct {
+    chance_percent: u32 = 10,
+    slow_factor: f64 = 0.7,
+    fast_factor: f64 = 1.3, // the request's phrasing was ambiguous on the exact "sped up" value - this is a starting guess, tune with !fast
+};
+
+var effect_mutex: std.Thread.Mutex = .{};
+var effect_settings: EffectSettings = .{};
+
+fn getEffectSettings() EffectSettings {
+    effect_mutex.lock();
+    defer effect_mutex.unlock();
+    return effect_settings;
+}
+
+fn setEffectChance(percent: u32) void {
+    effect_mutex.lock();
+    defer effect_mutex.unlock();
+    effect_settings.chance_percent = percent;
+}
+
+fn setEffectSlow(factor: f64) void {
+    effect_mutex.lock();
+    defer effect_mutex.unlock();
+    effect_settings.slow_factor = factor;
+}
+
+fn setEffectFast(factor: f64) void {
+    effect_mutex.lock();
+    defer effect_mutex.unlock();
+    effect_settings.fast_factor = factor;
+}
+
+fn rollEffect() Effect {
+    const settings = getEffectSettings();
+    const roll = std.crypto.random.intRangeLessThan(u32, 0, 100);
+    if (roll >= settings.chance_percent) return .none;
+    return if (std.crypto.random.boolean()) .slow else .fast;
+}
+
 const PlayerCtx = struct {
     allocator: std.mem.Allocator,
     ptt_key: []const u8,
@@ -170,9 +214,10 @@ const PlayerCtx = struct {
 };
 
 fn enqueueSound(sound_path: []const u8) !void {
+    const effect = rollEffect();
     queue_mutex.lock();
     defer queue_mutex.unlock();
-    try sound_queue.append(.{ .sound_path = sound_path });
+    try sound_queue.append(.{ .sound_path = sound_path, .effect = effect });
     queue_cond.signal();
 }
 
@@ -201,13 +246,18 @@ fn playerLoop(ctx: *const PlayerCtx) void {
         const item = sound_queue.orderedRemove(0);
         queue_mutex.unlock();
 
-        playOne(ctx, item.sound_path);
+        playOne(ctx, item.sound_path, item.effect);
         ctx.allocator.free(item.sound_path);
     }
 }
 
-fn playOne(ctx: *const PlayerCtx, sound_path: []const u8) void {
-    std.debug.print("[soundbot] playing {s}\n", .{sound_path});
+fn playOne(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) void {
+    const effect_label: []const u8 = switch (effect) {
+        .none => "",
+        .slow => " (slowed)",
+        .fast => " (sped up)",
+    };
+    std.debug.print("[soundbot] playing {s}{s}\n", .{ sound_path, effect_label });
 
     runCmd(ctx.allocator, &.{ "xdotool", "keydown", ctx.ptt_key }) catch |err| {
         std.debug.print("[soundbot] keydown failed: {}\n", .{err});
@@ -217,39 +267,61 @@ fn playOne(ctx: *const PlayerCtx, sound_path: []const u8) void {
     // clipped, bump this back up; if not, it can likely go even lower than this.
     std.time.sleep(50 * std.time.ns_per_ms);
 
-    // .wav files skip ffmpeg entirely - paplay is a tiny, purpose-built PulseAudio
-    // client with none of ffmpeg's format-probing/codec-loading overhead, so it
-    // starts noticeably faster. Anything else still goes through ffmpeg.
-    var child = if (std.mem.endsWith(u8, sound_path, ".wav"))
-        std.process.Child.init(&.{ "paplay", "--device", ctx.sink, sound_path }, ctx.allocator)
-    else
-        std.process.Child.init(&.{
-            "ffmpeg", "-nostdin", "-loglevel", "error",
-            "-i",     sound_path,
-            "-f",     "pulse",    ctx.sink,
-        }, ctx.allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Inherit;
-
-    child.spawn() catch |err| {
-        std.debug.print("[soundbot] playback spawn failed: {}\n", .{err});
-        std.time.sleep(50 * std.time.ns_per_ms);
-        runCmd(ctx.allocator, &.{ "xdotool", "keyup", ctx.ptt_key }) catch {};
-        return;
+    playFile(ctx, sound_path, effect) catch |err| {
+        std.debug.print("[soundbot] playback failed: {}\n", .{err});
     };
-
-    current_pid.store(@intCast(child.id), .release);
-    // If a stop command killed it, this just returns (possibly with a non-zero
-    // exit status) instead of erroring - either way we fall through to keyup below,
-    // so the mic always gets released regardless of why playback stopped.
-    _ = child.wait() catch {};
-    current_pid.store(-1, .release);
 
     std.time.sleep(50 * std.time.ns_per_ms);
     runCmd(ctx.allocator, &.{ "xdotool", "keyup", ctx.ptt_key }) catch |err| {
         std.debug.print("[soundbot] keyup failed: {}\n", .{err});
     };
+}
+
+fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) !void {
+    var argv = std.ArrayList([]const u8).init(ctx.allocator);
+    defer argv.deinit();
+
+    // Buffer for the "atempo=X.XXX" filter string - lives for this whole function,
+    // which is fine since the spawn+wait below happens before it'd go out of scope.
+    var filter_buf: [64]u8 = undefined;
+
+    // Files with no active effect skip ffmpeg in favor of a lighter, format-specific
+    // player: paplay for .wav, mpg123 for .mp3. Both are far lighter than ffmpeg's
+    // general-purpose format probing/codec loading, so they start noticeably faster.
+    // Anything with an active effect needs ffmpeg's atempo filter though, and anything
+    // else not .wav/.mp3 falls through to ffmpeg too.
+    if (effect == .none and std.mem.endsWith(u8, sound_path, ".wav")) {
+        try argv.appendSlice(&.{ "paplay", "--device", ctx.sink, sound_path });
+    } else if (effect == .none and std.mem.endsWith(u8, sound_path, ".mp3")) {
+        try argv.appendSlice(&.{ "mpg123", "-q", "-o", "pulse", "-a", ctx.sink, sound_path });
+    } else {
+        try argv.appendSlice(&.{ "ffmpeg", "-nostdin", "-loglevel", "error", "-i", sound_path });
+        if (effect != .none) {
+            const factor: f64 = switch (effect) {
+                .none => unreachable,
+                .slow => getEffectSettings().slow_factor,
+                .fast => getEffectSettings().fast_factor,
+            };
+            // atempo only supports 0.5-2.0 in a single filter instance - chain multiple
+            // atempo filters if you ever need a more extreme factor than that.
+            const filter_arg = try std.fmt.bufPrint(&filter_buf, "atempo={d:.3}", .{factor});
+            try argv.appendSlice(&.{ "-filter:a", filter_arg });
+        }
+        try argv.appendSlice(&.{ "-f", "pulse", ctx.sink });
+    }
+
+    var child = std.process.Child.init(argv.items, ctx.allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Inherit;
+
+    try child.spawn();
+    current_pid.store(@intCast(child.id), .release);
+    // If a stop command killed it, this just returns (possibly with a non-zero
+    // exit status) instead of erroring - either way the caller still releases
+    // the PTT key regardless of why playback stopped.
+    _ = child.wait() catch {};
+    current_pid.store(-1, .release);
 }
 
 fn triggerSound(allocator: std.mem.Allocator, cfg: *const Config, name: []const u8) !void {
@@ -484,8 +556,53 @@ pub fn main() !void {
         }
         if (!name_is_safe) continue;
 
-        if (std.mem.eql(u8, name, "clear")) {
+        if (std.mem.eql(u8, name, "stop")) {
             clearQueueAndStopCurrent(allocator);
+            continue;
+        }
+
+        if (std.mem.eql(u8, name, "chance")) {
+            const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
+            const percent = std.fmt.parseInt(u32, rest, 10) catch {
+                std.debug.print("[soundbot] !chance needs a whole number 0-100, e.g. !chance 10\n", .{});
+                continue;
+            };
+            if (percent > 100) {
+                std.debug.print("[soundbot] !chance must be 0-100, got {d}\n", .{percent});
+                continue;
+            }
+            setEffectChance(percent);
+            std.debug.print("[soundbot] effect chance set to {d}%\n", .{percent});
+            continue;
+        }
+
+        if (std.mem.eql(u8, name, "slow")) {
+            const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
+            const factor = std.fmt.parseFloat(f64, rest) catch {
+                std.debug.print("[soundbot] !slow needs a number, e.g. !slow 0.7\n", .{});
+                continue;
+            };
+            if (factor < 0.5 or factor > 2.0) {
+                std.debug.print("[soundbot] !slow should be 0.5-2.0 (ffmpeg's atempo limit per filter), got {d}\n", .{factor});
+                continue;
+            }
+            setEffectSlow(factor);
+            std.debug.print("[soundbot] slow factor set to {d}x\n", .{factor});
+            continue;
+        }
+
+        if (std.mem.eql(u8, name, "fast")) {
+            const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
+            const factor = std.fmt.parseFloat(f64, rest) catch {
+                std.debug.print("[soundbot] !fast needs a number, e.g. !fast 1.3\n", .{});
+                continue;
+            };
+            if (factor < 0.5 or factor > 2.0) {
+                std.debug.print("[soundbot] !fast should be 0.5-2.0 (ffmpeg's atempo limit per filter), got {d}\n", .{factor});
+                continue;
+            }
+            setEffectFast(factor);
+            std.debug.print("[soundbot] fast factor set to {d}x\n", .{factor});
             continue;
         }
 
