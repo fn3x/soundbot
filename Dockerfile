@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pulseaudio pulseaudio-utils libasound2-plugins alsa-utils \
     ffmpeg xdotool mpg123 \
     openssh-client sshpass \
-    ca-certificates util-linux \
+    ca-certificates util-linux awscli \
     libnotify4 libatomic1 libnspr4 libnss3 \
     libatk1.0-0 libatk-bridge2.0-0 libcups2 libatspi2.0-0 \
     libxcomposite1 \

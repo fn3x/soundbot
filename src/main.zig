@@ -214,19 +214,31 @@ fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.lessThan(u8, a, b);
 }
 
-// Builds the !sounds reply text: every file's own trigger name (sound1.mp3 -> !sound1),
-// plus - for any file with a numeric suffix - the shared family trigger too
-// (sound1.mp3 + sound2.mp3 -> also !sound), since findSoundFileFamily would
-// actually answer to that name too.
+fn lessThanStrMut(_: void, a: []u8, b: []u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+// Builds the !sounds reply text, grouping numbered siblings under their shared
+// family trigger:
+//   Available sounds:
+//
+//   * !du (!du1 !du2)
+//   * !fah
 fn buildSoundsList(allocator: std.mem.Allocator, sounds_dir: []const u8) ![]u8 {
     var dir = try std.fs.cwd().openDir(sounds_dir, .{ .iterate = true });
     defer dir.close();
 
-    var names = std.StringHashMap(void).init(allocator);
+    // group key (family prefix, or the bare name for files with no numeric
+    // suffix) -> list of individual member names (empty for non-family files).
+    var groups = std.StringHashMap(std.ArrayList([]u8)).init(allocator);
     defer {
-        var kit = names.keyIterator();
-        while (kit.next()) |k| allocator.free(k.*);
-        names.deinit();
+        var it = groups.iterator();
+        while (it.next()) |entry| {
+            for (entry.value_ptr.items) |m| allocator.free(m);
+            entry.value_ptr.deinit();
+            allocator.free(entry.key_ptr.*);
+        }
+        groups.deinit();
     }
 
     var it = dir.iterate();
@@ -236,37 +248,58 @@ fn buildSoundsList(allocator: std.mem.Allocator, sounds_dir: []const u8) ![]u8 {
         const base = entry.name[0..dot];
         if (base.len == 0) continue;
 
-        if (!names.contains(base)) {
-            try names.put(try allocator.dupe(u8, base), {});
-        }
-
-        // Trailing digits -> the family prefix is also a valid trigger.
         var digit_start: usize = base.len;
         while (digit_start > 0 and std.ascii.isDigit(base[digit_start - 1])) digit_start -= 1;
-        if (digit_start < base.len and digit_start > 0) {
-            const family = base[0..digit_start];
-            if (!names.contains(family)) {
-                try names.put(try allocator.dupe(u8, family), {});
+        const has_family = digit_start < base.len and digit_start > 0;
+
+        const key = if (has_family) base[0..digit_start] else base;
+
+        const gop = try groups.getOrPut(key);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = try allocator.dupe(u8, key);
+            gop.value_ptr.* = std.ArrayList([]u8).init(allocator);
+        }
+
+        if (has_family) {
+            var already = false;
+            for (gop.value_ptr.items) |m| {
+                if (std.mem.eql(u8, m, base)) {
+                    already = true;
+                    break;
+                }
             }
+            if (!already) try gop.value_ptr.append(try allocator.dupe(u8, base));
         }
     }
 
-    var list = std.ArrayList([]const u8).init(allocator);
-    defer list.deinit();
-    var kit = names.keyIterator();
-    while (kit.next()) |k| try list.append(k.*);
-    std.mem.sort([]const u8, list.items, {}, lessThanStr);
+    var keys = std.ArrayList([]const u8).init(allocator);
+    defer keys.deinit();
+    var kit = groups.keyIterator();
+    while (kit.next()) |k| try keys.append(k.*);
+    std.mem.sort([]const u8, keys.items, {}, lessThanStr);
 
     var out = std.ArrayList(u8).init(allocator);
     errdefer out.deinit();
-    if (list.items.len == 0) {
+    if (keys.items.len == 0) {
         try out.appendSlice("No sounds available.");
     } else {
-        try out.appendSlice("Available sounds:");
-        for (list.items) |n| {
-            try out.append(' ');
-            try out.append('!');
-            try out.appendSlice(n);
+        try out.appendSlice("Available sounds:\n\n");
+        for (keys.items) |key| {
+            try out.appendSlice("* !");
+            try out.appendSlice(key);
+
+            const members = groups.getPtr(key).?.items;
+            std.mem.sort([]u8, members, {}, lessThanStrMut);
+            if (members.len > 0) {
+                try out.appendSlice(" (");
+                for (members, 0..) |m, i| {
+                    if (i > 0) try out.append(' ');
+                    try out.append('!');
+                    try out.appendSlice(m);
+                }
+                try out.appendSlice(")");
+            }
+            try out.append('\n');
         }
     }
     return out.toOwnedSlice();
@@ -281,6 +314,7 @@ const Effect = enum { none, slow, fast };
 const QueueItem = struct {
     sound_path: []const u8,
     effect: Effect,
+    delete_after: bool, // true for dynamically-generated files (TTS output) that should be cleaned up after playing
 };
 
 var queue_mutex: std.Thread.Mutex = .{};
@@ -342,17 +376,20 @@ const PlayerCtx = struct {
     sink: []const u8,
 };
 
-fn enqueueSound(sound_path: []const u8) !void {
+fn enqueueSound(sound_path: []const u8, delete_after: bool) !void {
     const effect = rollEffect();
     queue_mutex.lock();
     defer queue_mutex.unlock();
-    try sound_queue.append(.{ .sound_path = sound_path, .effect = effect });
+    try sound_queue.append(.{ .sound_path = sound_path, .effect = effect, .delete_after = delete_after });
     queue_cond.signal();
 }
 
 fn clearQueueAndStopCurrent(allocator: std.mem.Allocator) void {
     queue_mutex.lock();
-    for (sound_queue.items) |item| allocator.free(item.sound_path);
+    for (sound_queue.items) |item| {
+        if (item.delete_after) std.fs.cwd().deleteFile(item.sound_path) catch {};
+        allocator.free(item.sound_path);
+    }
     sound_queue.clearRetainingCapacity();
     queue_mutex.unlock();
 
@@ -376,6 +413,7 @@ fn playerLoop(ctx: *const PlayerCtx) void {
         queue_mutex.unlock();
 
         playOne(ctx, item.sound_path, item.effect);
+        if (item.delete_after) std.fs.cwd().deleteFile(item.sound_path) catch {};
         ctx.allocator.free(item.sound_path);
     }
 }
@@ -505,16 +543,105 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) !void
 
 fn triggerSound(allocator: std.mem.Allocator, cfg: *const Config, name: []const u8) !void {
     if (try findSoundFile(allocator, cfg.sounds_dir, name)) |path| {
-        try enqueueSound(path);
+        try enqueueSound(path, false);
         return;
     }
 
     if (try findSoundFileFamily(allocator, cfg.sounds_dir, name)) |path| {
-        try enqueueSound(path);
+        try enqueueSound(path, false);
         return;
     }
 
     std.debug.print("[soundbot] no sound file found for !{s}\n", .{name});
+}
+
+// ---- Text-to-speech via Amazon Polly, through the AWS CLI ----
+// Calling Polly's API directly would mean implementing AWS SigV4 request
+// signing from scratch - a real cryptographic protocol, not something to
+// improvise without being able to test against live AWS. The AWS CLI already
+// handles that correctly, so it's used as a subprocess instead, the same way
+// this bot already shells out to ssh/ffmpeg/xdotool rather than reimplementing
+// any of those protocols either. Credentials (AWS_ACCESS_KEY_ID,
+// AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION) are expected as plain environment
+// variables on the container - the aws CLI picks those up on its own, and
+// std.process.Child inherits the parent's environment by default, so no
+// credential-handling code is needed here at all.
+
+const max_tts_chars = 150;
+
+// All standard-engine voices (no neural ones - those need a per-voice --engine
+// override, which got dropped along with Kevin, the only voice that needed it).
+// Add a new voice by adding a line here; no dispatch-logic changes needed.
+const TtsVoice = struct {
+    cmd: []const u8,
+    voice_id: []const u8,
+};
+
+const tts_voices = [_]TtsVoice{
+    .{ .cmd = "ttsg", .voice_id = "Giorgio" }, // Italian
+    .{ .cmd = "ttsb", .voice_id = "Brian" }, // British English
+    .{ .cmd = "ttsjo", .voice_id = "Joanna" }, // US English
+    .{ .cmd = "ttsma", .voice_id = "Matthew" }, // US English
+    .{ .cmd = "ttssa", .voice_id = "Salli" }, // US English
+    .{ .cmd = "ttsam", .voice_id = "Amy" }, // British English
+    .{ .cmd = "ttsem", .voice_id = "Emma" }, // British English
+    .{ .cmd = "ttsju", .voice_id = "Justin" }, // US English
+    .{ .cmd = "ttsni", .voice_id = "Nicole" }, // Australian English
+    .{ .cmd = "ttsca", .voice_id = "Carla" }, // Italian
+    .{ .cmd = "ttsm", .voice_id = "Maxim" }, // Russian
+    .{ .cmd = "ttst", .voice_id = "Tatyana" }, // Russian
+};
+
+fn findTtsVoice(name: []const u8) ?[]const u8 {
+    inline for (tts_voices) |v| {
+        if (std.mem.eql(u8, name, v.cmd)) return v.voice_id;
+    }
+    return null;
+}
+
+fn synthesizeTts(allocator: std.mem.Allocator, voice_id: []const u8, engine: ?[]const u8, text: []const u8, out_path: []const u8) !void {
+    var argv = std.ArrayList([]const u8).init(allocator);
+    defer argv.deinit();
+    try argv.appendSlice(&.{
+        "aws",          "polly", "synthesize-speech",
+        "--output-format", "mp3",
+        "--voice-id",   voice_id,
+        "--text",       text,
+    });
+    if (engine) |e| {
+        try argv.appendSlice(&.{ "--engine", e });
+    }
+    try argv.append(out_path);
+    try runAndTrack(allocator, argv.items);
+}
+
+// Caught/logged here rather than propagated with `try`, deliberately unlike
+// most of this bot's other multi-step command handlers - a network call to an
+// external API is far more likely to transiently fail than a local SSH
+// command, and a flaky Polly request shouldn't be able to take the whole bot
+// down with it.
+fn handleTtsCommand(allocator: std.mem.Allocator, voice_id: []const u8, engine: ?[]const u8, raw_text: []const u8) void {
+    const text = if (raw_text.len > max_tts_chars) raw_text[0..max_tts_chars] else raw_text;
+    if (text.len == 0) {
+        std.debug.print("[soundbot] tts command needs some text after it, e.g. !ttsb hello there\n", .{});
+        return;
+    }
+
+    const out_path = std.fmt.allocPrint(allocator, "/tmp/soundbot_tts_{d}.mp3", .{std.time.milliTimestamp()}) catch |err| {
+        std.debug.print("[soundbot] tts failed to build temp path: {}\n", .{err});
+        return;
+    };
+
+    synthesizeTts(allocator, voice_id, engine, text, out_path) catch |err| {
+        std.debug.print("[soundbot] tts synthesis failed: {}\n", .{err});
+        allocator.free(out_path);
+        return;
+    };
+
+    enqueueSound(out_path, true) catch |err| {
+        std.debug.print("[soundbot] failed to queue tts output: {}\n", .{err});
+        allocator.free(out_path);
+    };
 }
 
 // ---- ServerQuery helpers: send a command, read lines until "error id=" terminator ----
@@ -768,6 +895,19 @@ pub fn main() !void {
             sendReply(allocator, stdin, reader, reply_targetmode, reply_target, list_msg) catch |err| {
                 std.debug.print("[soundbot] failed to send sounds list: {}\n", .{err});
             };
+            continue;
+        }
+
+        if (findTtsVoice(name)) |voice_id| {
+            const text = std.mem.trim(u8, after_bang[name_end..], " \t");
+            handleTtsCommand(allocator, voice_id, null, text);
+            continue;
+        }
+
+        if (std.mem.eql(u8, name, "tts")) {
+            const text = std.mem.trim(u8, after_bang[name_end..], " \t");
+            const voice_id = tts_voices[std.crypto.random.intRangeLessThan(usize, 0, tts_voices.len)].voice_id;
+            handleTtsCommand(allocator, voice_id, null, text);
             continue;
         }
 
