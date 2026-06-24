@@ -26,7 +26,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb x11vnc x11-utils \
     pulseaudio pulseaudio-utils libasound2-plugins alsa-utils \
-    ffmpeg xdotool mpg123 \
+    ffmpeg xdotool mpg123 sox libsox-fmt-all \
     openssh-client sshpass \
     ca-certificates util-linux awscli \
     libnotify4 libatomic1 libnspr4 libnss3 \

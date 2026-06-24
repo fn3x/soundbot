@@ -15,6 +15,7 @@ const Effect = enum { none, slow, fast };
 const QueueItem = struct {
     sound_path: []const u8,
     effect: Effect,
+    reverb: bool, // independent of effect - can combine with none/slow/fast alike
     delete_after: bool, // true for dynamically-generated files (TTS output) that should be cleaned up after playing
 };
 
@@ -34,13 +35,18 @@ pub fn initQueue(allocator: std.mem.Allocator) void {
 // across threads (that would risk two threads both calling wait() on it).
 var current_pid = std.atomic.Value(i32).init(-1);
 
-// Runtime-tunable via !chance / !slow / !fast - not persisted across restarts.
-// slow_factor/fast_factor affect pitch AND speed together (like a record played
-// at the wrong speed) - 0.7 = deeper voice + slower, 1.3 = higher voice + faster.
+// Runtime-tunable via !chance / !slow / !fast / !chancereverb / !reverbamount -
+// not persisted across restarts. slow_factor/fast_factor affect pitch AND speed
+// together (like a record played at the wrong speed) - 0.7 = deeper voice +
+// slower, 1.3 = higher voice + faster. reverb_chance_percent and reverb_amount
+// are rolled/applied completely independently of the pitch/speed effect, so a
+// sound can be slowed *and* reverby, sped up *and* reverby, or reverby on its own.
 const EffectSettings = struct {
     chance_percent: u32 = 10,
     slow_factor: f64 = 0.7,
     fast_factor: f64 = 1.3, // a starting guess - tune with !fast if 1.3 isn't what you want
+    reverb_chance_percent: u32 = 10,
+    reverb_amount: u32 = 50, // maps directly to sox's reverb "reverberance" 0-100
 };
 
 var effect_mutex: std.Thread.Mutex = .{};
@@ -70,11 +76,29 @@ pub fn setEffectFast(factor: f64) void {
     effect_settings.fast_factor = factor;
 }
 
+pub fn setReverbChance(percent: u32) void {
+    effect_mutex.lock();
+    defer effect_mutex.unlock();
+    effect_settings.reverb_chance_percent = percent;
+}
+
+pub fn setReverbAmount(amount: u32) void {
+    effect_mutex.lock();
+    defer effect_mutex.unlock();
+    effect_settings.reverb_amount = amount;
+}
+
 fn rollEffect() Effect {
     const settings = getEffectSettings();
     const roll = std.crypto.random.intRangeLessThan(u32, 0, 100);
     if (roll >= settings.chance_percent) return .none;
     return if (std.crypto.random.boolean()) .slow else .fast;
+}
+
+fn rollReverb() bool {
+    const settings = getEffectSettings();
+    const roll = std.crypto.random.intRangeLessThan(u32, 0, 100);
+    return roll < settings.reverb_chance_percent;
 }
 
 pub const PlayerCtx = struct {
@@ -85,9 +109,10 @@ pub const PlayerCtx = struct {
 
 pub fn enqueueSound(sound_path: []const u8, delete_after: bool) !void {
     const effect = rollEffect();
+    const reverb = rollReverb();
     queue_mutex.lock();
     defer queue_mutex.unlock();
-    try sound_queue.append(.{ .sound_path = sound_path, .effect = effect, .delete_after = delete_after });
+    try sound_queue.append(.{ .sound_path = sound_path, .effect = effect, .reverb = reverb, .delete_after = delete_after });
     queue_cond.signal();
 }
 
@@ -119,19 +144,20 @@ pub fn playerLoop(ctx: *const PlayerCtx) void {
         const item = sound_queue.orderedRemove(0);
         queue_mutex.unlock();
 
-        playOne(ctx, item.sound_path, item.effect);
+        playOne(ctx, item.sound_path, item.effect, item.reverb);
         if (item.delete_after) std.fs.cwd().deleteFile(item.sound_path) catch {};
         ctx.allocator.free(item.sound_path);
     }
 }
 
-fn playOne(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) void {
+fn playOne(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, reverb: bool) void {
     const effect_label: []const u8 = switch (effect) {
         .none => "",
         .slow => " (slowed + pitched down)",
         .fast => " (sped up + pitched up)",
     };
-    std.debug.print("[soundbot] playing {s}{s}\n", .{ sound_path, effect_label });
+    const reverb_label: []const u8 = if (reverb) " (reverb)" else "";
+    std.debug.print("[soundbot] playing {s}{s}{s}\n", .{ sound_path, effect_label, reverb_label });
 
     runCmd(ctx.allocator, &.{ "xdotool", "keydown", ctx.ptt_key }) catch |err| {
         std.debug.print("[soundbot] keydown failed: {}\n", .{err});
@@ -141,7 +167,7 @@ fn playOne(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) void {
     // clipped, bump this back up; if not, it can likely go even lower than this.
     std.time.sleep(50 * std.time.ns_per_ms);
 
-    playFile(ctx, sound_path, effect) catch |err| {
+    playFile(ctx, sound_path, effect, reverb) catch |err| {
         std.debug.print("[soundbot] playback failed: {}\n", .{err});
     };
 
@@ -193,9 +219,9 @@ pub fn runAndTrack(allocator: std.mem.Allocator, argv: []const []const u8) !void
     current_pid.store(-1, .release);
 }
 
-fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) !void {
-    // No effect: same lightweight, format-specific fast paths as before.
-    if (effect == .none) {
+fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, reverb: bool) !void {
+    // Neither effect active: same lightweight, format-specific fast paths as before.
+    if (effect == .none and !reverb) {
         if (std.mem.endsWith(u8, sound_path, ".wav")) {
             return runAndTrack(ctx.allocator, &.{ "paplay", "--device", ctx.sink, sound_path });
         }
@@ -205,47 +231,75 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) !void
         return runAndTrack(ctx.allocator, &.{ "ffmpeg", "-nostdin", "-loglevel", "error", "-i", sound_path, "-f", "pulse", ctx.sink });
     }
 
-    // An effect is active: transcode to a temp WAV file first (plain file I/O,
-    // no live-device timing involved at all), then play that file through the
-    // same paplay path already proven reliable. ffmpeg writing the atempo'd
-    // audio straight to the live pulse sink was the actual bug behind sped-up
-    // clips sometimes not being audible: it can exit right after handing off
-    // the last chunk, before PulseAudio has actually finished draining it.
-    // Slowed clips take long enough to write that this mostly went unnoticed;
-    // sped-up ones finish writing fast enough to exit before anything plays.
-    const factor: f64 = switch (effect) {
-        .none => unreachable,
-        .slow => getEffectSettings().slow_factor,
-        .fast => getEffectSettings().fast_factor,
-    };
+    // At least one of {pitch/speed, reverb} is active - route everything through
+    // one or more temp-file stages (plain file I/O, no live-device timing
+    // involved), then play the final result through the same paplay path
+    // already proven reliable. Writing effect-processed audio straight to the
+    // live pulse sink was the actual bug behind sped-up clips sometimes not
+    // being audible: ffmpeg can exit right after handing off the last chunk,
+    // before PulseAudio has actually finished draining it.
+    var temp_paths: [2][]const u8 = undefined;
+    var temp_count: usize = 0;
+    defer {
+        var i: usize = 0;
+        while (i < temp_count) : (i += 1) {
+            std.fs.cwd().deleteFile(temp_paths[i]) catch {};
+            ctx.allocator.free(temp_paths[i]);
+        }
+    }
 
-    // Combined pitch + speed change, tied together via the same factor - like a
-    // record played at the wrong speed: asetrate reinterprets the audio at a
-    // scaled sample rate, shifting pitch and tempo together. asetrate needs a
-    // literal number here, not an expression, so the file's actual rate is
-    // probed first rather than assumed.
-    const original_rate = probeSampleRate(ctx.allocator, sound_path) catch 48000;
-    const new_rate: f64 = @as(f64, @floatFromInt(original_rate)) * factor;
+    var current_path: []const u8 = sound_path;
 
-    var filter_buf: [64]u8 = undefined;
-    const filter_arg = try std.fmt.bufPrint(
-        &filter_buf,
-        "asetrate={d:.0},aresample={d}",
-        .{ new_rate, original_rate },
-    );
+    if (effect != .none) {
+        // Combined pitch + speed change, tied together via the same factor -
+        // like a record played at the wrong speed: asetrate reinterprets the
+        // audio at a scaled sample rate, shifting pitch and tempo together.
+        // asetrate needs a literal number here, not an expression, so the
+        // file's actual rate is probed first rather than assumed.
+        const factor: f64 = switch (effect) {
+            .none => unreachable,
+            .slow => getEffectSettings().slow_factor,
+            .fast => getEffectSettings().fast_factor,
+        };
+        const original_rate = probeSampleRate(ctx.allocator, current_path) catch 48000;
+        const new_rate: f64 = @as(f64, @floatFromInt(original_rate)) * factor;
 
-    const tmp_path = try std.fmt.allocPrint(ctx.allocator, "/tmp/soundbot_effect_{d}.wav", .{std.time.milliTimestamp()});
-    defer ctx.allocator.free(tmp_path);
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+        var filter_buf: [64]u8 = undefined;
+        const filter_arg = try std.fmt.bufPrint(
+            &filter_buf,
+            "asetrate={d:.0},aresample={d}",
+            .{ new_rate, original_rate },
+        );
 
-    try runAndTrack(ctx.allocator, &.{
-        "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
-        "-i",     sound_path,
-        "-filter:a", filter_arg,
-        tmp_path,
-    });
+        const tmp_path = try std.fmt.allocPrint(ctx.allocator, "/tmp/soundbot_pitch_{d}.wav", .{std.time.milliTimestamp()});
+        try runAndTrack(ctx.allocator, &.{
+            "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+            "-i",     current_path,
+            "-filter:a", filter_arg,
+            tmp_path,
+        });
 
-    try runAndTrack(ctx.allocator, &.{ "paplay", "--device", ctx.sink, tmp_path });
+        temp_paths[temp_count] = tmp_path;
+        temp_count += 1;
+        current_path = tmp_path;
+    }
+
+    if (reverb) {
+        // sox's "reverberance" parameter is already a plain 0-100 percentage,
+        // matching !reverbamount directly with no rescaling needed.
+        const amount = getEffectSettings().reverb_amount;
+        var amount_buf: [8]u8 = undefined;
+        const amount_arg = try std.fmt.bufPrint(&amount_buf, "{d}", .{amount});
+
+        const tmp_path = try std.fmt.allocPrint(ctx.allocator, "/tmp/soundbot_reverb_{d}.wav", .{std.time.milliTimestamp()});
+        try runAndTrack(ctx.allocator, &.{ "sox", current_path, tmp_path, "reverb", amount_arg });
+
+        temp_paths[temp_count] = tmp_path;
+        temp_count += 1;
+        current_path = tmp_path;
+    }
+
+    try runAndTrack(ctx.allocator, &.{ "paplay", "--device", ctx.sink, current_path });
 }
 
 pub fn triggerSound(allocator: std.mem.Allocator, sounds_dir: []const u8, name: []const u8) !void {

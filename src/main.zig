@@ -244,6 +244,36 @@ pub fn main() !void {
             continue;
         }
 
+        if (std.mem.eql(u8, name, "chancereverb")) {
+            const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
+            const percent = std.fmt.parseInt(u32, rest, 10) catch {
+                std.debug.print("[soundbot] !chancereverb needs a whole number 0-100, e.g. !chancereverb 10\n", .{});
+                continue;
+            };
+            if (percent > 100) {
+                std.debug.print("[soundbot] !chancereverb must be 0-100, got {d}\n", .{percent});
+                continue;
+            }
+            playback.setReverbChance(percent);
+            std.debug.print("[soundbot] reverb chance set to {d}% (independent of !chance)\n", .{percent});
+            continue;
+        }
+
+        if (std.mem.eql(u8, name, "reverbamount")) {
+            const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
+            const amount = std.fmt.parseInt(u32, rest, 10) catch {
+                std.debug.print("[soundbot] !reverbamount needs a whole number 0-100, e.g. !reverbamount 50\n", .{});
+                continue;
+            };
+            if (amount > 100) {
+                std.debug.print("[soundbot] !reverbamount must be 0-100, got {d}\n", .{amount});
+                continue;
+            }
+            playback.setReverbAmount(amount);
+            std.debug.print("[soundbot] reverb amount set to {d}\n", .{amount});
+            continue;
+        }
+
         if (std.mem.eql(u8, name, "join")) {
             const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
 
