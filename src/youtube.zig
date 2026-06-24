@@ -45,6 +45,12 @@ fn downloadAudio(allocator: std.mem.Allocator, query_or_url: []const u8, seconds
         "--no-playlist",
         "-x",
         "--audio-format", "mp3",
+        // YouTube's bot-detection ("Sign in to confirm you're not a bot") hits
+        // datacenter/VPS IPs - exactly what this runs on - especially hard.
+        // Spoofing the Android client is the most commonly reported fix that
+        // doesn't need real account cookies; not guaranteed, since this kind
+        // of workaround can stop working whenever YouTube adjusts its checks.
+        "--extractor-args", "youtube:player_client=android",
     });
 
     // "*0-N" downloads only that exact time range (the "*" means real
@@ -58,6 +64,16 @@ fn downloadAudio(allocator: std.mem.Allocator, query_or_url: []const u8, seconds
 
     try argv.appendSlice(&.{ "-o", out_path, target });
     try playback.runAndTrack(allocator, argv.items);
+
+    // runAndTrack doesn't surface yt-dlp's exit code, so check for the actual
+    // output file instead - simpler, and it's the only thing that actually
+    // matters for whether playback can proceed. A failed extraction (bot
+    // detection, deleted video, region lock, etc.) means no file ever exists,
+    // and without this check that silently got queued anyway, surfacing as a
+    // confusing "file not found" deep in playback instead of a clear error here.
+    std.fs.cwd().access(out_path, .{}) catch {
+        return error.YtDlpProducedNoFile;
+    };
 }
 
 // Caught/logged here rather than propagated with `try`, same reasoning as the
