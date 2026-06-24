@@ -58,6 +58,11 @@ RUN mkdir -p ./sounds ./teamspeak-client
 RUN mkdir -p /home/appuser/.cache/TeamSpeak \
     && chown -R appuser:appuser /home/appuser /opt/soundbot
 
+# Xvfb normally relies on root to create this socket directory - since the
+# container now runs as a regular user, it has to already exist with the
+# standard sticky-bit world-writable permissions X11 expects.
+RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+
 COPY scripts/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

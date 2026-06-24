@@ -3,6 +3,11 @@ set -e
 
 export DISPLAY="${DISPLAY:-:99}"
 SINK_NAME="${TS_SINK:-ts_bot_sink}"
+DISPLAY_NUM="${DISPLAY#:}"
+
+# Clean up anything left behind by a previously crashed Xvfb in this same
+# container (restart != recreation, so /tmp survives between the two).
+rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
 
 echo "[entrypoint] starting Xvfb on $DISPLAY"
 Xvfb "$DISPLAY" -screen 0 1024x768x24 &
