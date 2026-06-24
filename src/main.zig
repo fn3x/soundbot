@@ -299,7 +299,7 @@ var current_pid = std.atomic.Value(i32).init(-1);
 const EffectSettings = struct {
     chance_percent: u32 = 10,
     slow_factor: f64 = 0.7,
-    fast_factor: f64 = 1.3,
+    fast_factor: f64 = 1.3, // a starting guess - tune with !fast if 1.3 isn't what you want
 };
 
 var effect_mutex: std.Thread.Mutex = .{};
@@ -406,6 +406,33 @@ fn playOne(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) void {
     };
 }
 
+// asetrate needs a literal numeric sample rate, not an expression (confirmed
+// the hard way - "sample_rate" is not a recognized constant in its eval
+// context). This gets the input file's actual rate via ffprobe so the pitch
+// shift's math is correct regardless of what rate any given file happens to
+// be at, rather than assuming a fixed value.
+fn probeSampleRate(allocator: std.mem.Allocator, sound_path: []const u8) !u32 {
+    var child = std.process.Child.init(&.{
+        "ffprobe", "-v",              "error",
+        "-select_streams", "a:0",
+        "-show_entries", "stream=sample_rate",
+        "-of", "csv=p=0",
+        sound_path,
+    }, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+
+    try child.spawn();
+    const stdout = child.stdout.?;
+    var buf: [32]u8 = undefined;
+    const n = try stdout.readAll(&buf);
+    _ = child.wait() catch {};
+
+    const trimmed = std.mem.trim(u8, buf[0..n], " \r\n\t");
+    return std.fmt.parseInt(u32, trimmed, 10) catch 48000;
+}
+
 fn runAndTrack(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var child = std.process.Child.init(argv, allocator);
     child.stdin_behavior = .Ignore;
@@ -451,10 +478,12 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) !void
     // scaled sample rate, which shifts pitch AND speed together (like a record
     // played at the wrong speed); atempo set to the *reciprocal* of that same
     // factor cancels the speed change back out while leaving the pitch shift in
-    // place. "sample_rate" here is ffmpeg's own expression variable referring to
-    // the input's actual native rate, so this works regardless of the file's
-    // real sample rate without needing to probe it first.
+    // place. asetrate needs a literal number here, not an expression, so the
+    // file's actual rate is probed first rather than assumed.
     const tempo_compensation = 1.0 / factor;
+    const original_rate = probeSampleRate(ctx.allocator, sound_path) catch 48000;
+    const new_rate: f64 = @as(f64, @floatFromInt(original_rate)) * factor;
+
     var filter_buf: [96]u8 = undefined;
     // atempo only supports 0.5-2.0 in a single filter instance, and since that
     // range is symmetric under reciprocation, constraining the pitch factor
@@ -462,8 +491,8 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect) !void
     // value safely in range too, with no extra check needed here.
     const filter_arg = try std.fmt.bufPrint(
         &filter_buf,
-        "asetrate=sample_rate*{d:.3},aresample=48000,atempo={d:.3}",
-        .{ factor, tempo_compensation },
+        "asetrate={d:.0},aresample={d},atempo={d:.3}",
+        .{ new_rate, original_rate, tempo_compensation },
     );
 
     const tmp_path = try std.fmt.allocPrint(ctx.allocator, "/tmp/soundbot_effect_{d}.wav", .{std.time.milliTimestamp()});
