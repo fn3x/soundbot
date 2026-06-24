@@ -29,6 +29,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg xdotool \
     openssh-client sshpass \
     ca-certificates \
+    libnotify4 libatomic1 libnspr4 libnss3 \
+    libatk1.0-0 libatk-bridge2.0-0 libcups2 libatspi2.0-0 \
+    libxcomposite1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/soundbot
