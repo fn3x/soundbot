@@ -56,20 +56,33 @@ fn installShutdownHandler() !void {
 }
 
 fn buildStatusText(allocator: std.mem.Allocator) ![]u8 {
-    const effect_settings = playback.getEffectSettings();
-    const master_settings = playback.getMasterSettings();
+    const eff = playback.getEffectSettings();
+    const mas = playback.getMasterSettings();
+    const yt_len = youtube.getMaxSeconds();
 
     var out = std.ArrayList(u8).init(allocator);
     errdefer out.deinit();
     const w = out.writer();
 
     try w.writeAll("Current settings:\n\n");
-
-    inline for (std.meta.fields(@TypeOf(effect_settings))) |field| {
-        try w.print("* {s} = {any}\n", .{ field.name, @field(effect_settings, field.name) });
+    try w.print("* !chance: {d}% (!slow={d:.2}x, !fast={d:.2}x)\n", .{ eff.chance_percent, eff.slow_factor, eff.fast_factor });
+    try w.print("* !chancereverb: {d}% (!reverbamount={d})\n", .{ eff.reverb_chance_percent, eff.reverb_amount });
+    try w.print("* !volume: {d}%\n", .{mas.volume_percent});
+    if (mas.compressor_enabled) {
+        try w.print(
+            "* !compressor: on (threshold={d}, ratio={d:.2}:1, makeup={d:.2}x)\n",
+            .{ mas.compressor_threshold_percent, mas.compressor_ratio, mas.compressor_makeup },
+        );
+    } else {
+        try w.print(
+            "* !compressor: off (threshold={d}, ratio={d:.2}:1, makeup={d:.2}x)\n",
+            .{ mas.compressor_threshold_percent, mas.compressor_ratio, mas.compressor_makeup },
+        );
     }
-    inline for (std.meta.fields(@TypeOf(master_settings))) |field| {
-        try w.print("* {s} = {any}\n", .{ field.name, @field(master_settings, field.name) });
+    if (yt_len == 0) {
+        try w.writeAll("* !ytlength: 0 (no cap)\n");
+    } else {
+        try w.print("* !ytlength: {d}\n", .{yt_len});
     }
 
     return out.toOwnedSlice();
@@ -417,7 +430,7 @@ pub fn main() !void {
             query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, ok_msg);
             continue;
         }
- 
+
         if (std.mem.eql(u8, name, "compressor")) {
             const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
             if (std.mem.eql(u8, rest, "on")) {
@@ -430,20 +443,20 @@ pub fn main() !void {
                 query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "Compressor disabled.");
                 continue;
             }
- 
+
             const usage_msg = "!compressor needs 'on', 'off', or exactly 3 numbers: !compressor <threshold 1-100> <ratio 1-20> <makeup 1-64>, e.g. !compressor 10 4 1";
- 
+
             var parts = std.mem.splitScalar(u8, rest, ' ');
             const part1 = parts.next();
             const part2 = parts.next();
             const part3 = parts.next();
             const extra = parts.next();
- 
+
             if (part1 == null or part2 == null or part3 == null or extra != null) {
                 query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, usage_msg);
                 continue;
             }
- 
+
             const threshold_percent = std.fmt.parseInt(u32, part1.?, 10) catch {
                 query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, usage_msg);
                 continue;
@@ -456,7 +469,7 @@ pub fn main() !void {
                 query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, usage_msg);
                 continue;
             };
- 
+
             // Bounds match ffmpeg's own acompressor limits, so an out-of-range
             // value fails clearly here instead of being silently rejected/clamped
             // by ffmpeg later with no chat feedback at all.
@@ -472,7 +485,7 @@ pub fn main() !void {
                 query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "Makeup must be 1-64 (ffmpeg's acompressor limit).");
                 continue;
             }
- 
+
             playback.setCompressorParams(threshold_percent, ratio, makeup);
             var buf: [128]u8 = undefined;
             const ok_msg = std.fmt.bufPrint(

@@ -16,7 +16,7 @@ pub fn setMaxSeconds(seconds: u32) void {
     max_seconds = seconds;
 }
 
-fn getMaxSeconds() u32 {
+pub fn getMaxSeconds() u32 {
     settings_mutex.lock();
     defer settings_mutex.unlock();
     return max_seconds;
