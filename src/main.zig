@@ -25,6 +25,7 @@ const help_text =
     \\* !slow / !fast <0.5-2.0> - how much, when it does
     \\* !chancereverb <0-100> - % chance a sound gets reverb (independent of !chance)
     \\* !reverbamount <0-100> - how much reverb, when it does
+    \\* !compressor on/off, or !compressor <threshold 1-100> <ratio 1-20> <makeup 1-64>
     \\* !help - this message
 ;
 
@@ -355,6 +356,91 @@ pub fn main() !void {
             playback.setReverbAmount(amount);
             var buf: [64]u8 = undefined;
             const ok_msg = std.fmt.bufPrint(&buf, "Reverb amount set to {d}", .{amount}) catch "Reverb amount updated";
+            query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, ok_msg);
+            continue;
+        }
+
+        if (std.mem.eql(u8, name, "volume")) {
+            const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
+            const percent = std.fmt.parseInt(u32, rest, 10) catch {
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "!volume needs a whole number 0-100, e.g. !volume 80");
+                continue;
+            };
+            if (percent > 100) {
+                var buf: [64]u8 = undefined;
+                const err_msg = std.fmt.bufPrint(&buf, "!volume must be 0-100, got {d}", .{percent}) catch "!volume must be 0-100";
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, err_msg);
+                continue;
+            }
+            playback.setVolume(percent);
+            var buf: [64]u8 = undefined;
+            const ok_msg = std.fmt.bufPrint(&buf, "Volume set to {d}% (applies to everything)", .{percent}) catch "Volume updated";
+            query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, ok_msg);
+            continue;
+        }
+ 
+        if (std.mem.eql(u8, name, "compressor")) {
+            const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
+            if (std.mem.eql(u8, rest, "on")) {
+                playback.setCompressorEnabled(true);
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "Compressor enabled - evens out loud/quiet sounds.");
+                continue;
+            }
+            if (std.mem.eql(u8, rest, "off")) {
+                playback.setCompressorEnabled(false);
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "Compressor disabled.");
+                continue;
+            }
+ 
+            const usage_msg = "!compressor needs 'on', 'off', or exactly 3 numbers: !compressor <threshold 1-100> <ratio 1-20> <makeup 1-64>, e.g. !compressor 10 4 1";
+ 
+            var parts = std.mem.splitScalar(u8, rest, ' ');
+            const part1 = parts.next();
+            const part2 = parts.next();
+            const part3 = parts.next();
+            const extra = parts.next();
+ 
+            if (part1 == null or part2 == null or part3 == null or extra != null) {
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, usage_msg);
+                continue;
+            }
+ 
+            const threshold_percent = std.fmt.parseInt(u32, part1.?, 10) catch {
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, usage_msg);
+                continue;
+            };
+            const ratio = std.fmt.parseFloat(f64, part2.?) catch {
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, usage_msg);
+                continue;
+            };
+            const makeup = std.fmt.parseFloat(f64, part3.?) catch {
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, usage_msg);
+                continue;
+            };
+ 
+            // Bounds match ffmpeg's own acompressor limits, so an out-of-range
+            // value fails clearly here instead of being silently rejected/clamped
+            // by ffmpeg later with no chat feedback at all.
+            if (threshold_percent < 1 or threshold_percent > 100) {
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "Threshold must be 1-100.");
+                continue;
+            }
+            if (ratio < 1.0 or ratio > 20.0) {
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "Ratio must be 1-20 (ffmpeg's acompressor limit).");
+                continue;
+            }
+            if (makeup < 1.0 or makeup > 64.0) {
+                query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "Makeup must be 1-64 (ffmpeg's acompressor limit).");
+                continue;
+            }
+ 
+            playback.setCompressorParams(threshold_percent, ratio, makeup);
+            var buf: [128]u8 = undefined;
+            const ok_msg = std.fmt.bufPrint(
+                &buf,
+                "Compressor enabled: threshold={d}, ratio={d}:1, makeup={d}x",
+                .{ threshold_percent, ratio, makeup },
+            ) catch "Compressor settings updated and enabled";
             query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, ok_msg);
             continue;
         }

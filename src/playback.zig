@@ -101,6 +101,51 @@ fn rollReverb() bool {
     return roll < settings.reverb_chance_percent;
 }
 
+// Always-applied master controls (!volume / !compressor) - unlike the random
+// effects above, these aren't rolled per trigger and aren't exempted for any
+// source (including yt-dlp audio, which the random effect roll deliberately
+// skips): they're deliberate, persistent settings, not random surprises, so
+// they apply uniformly to everything.
+const MasterSettings = struct {
+    volume_percent: u32 = 100,
+    compressor_enabled: bool = false,
+    compressor_threshold_percent: u32 = 10, // -> linear 0.1 (~-20dB) when passed to acompressor
+    compressor_ratio: f64 = 4,
+    compressor_makeup: f64 = 1,
+};
+
+var master_mutex: std.Thread.Mutex = .{};
+var master_settings: MasterSettings = .{};
+
+fn getMasterSettings() MasterSettings {
+    master_mutex.lock();
+    defer master_mutex.unlock();
+    return master_settings;
+}
+
+pub fn setVolume(percent: u32) void {
+    master_mutex.lock();
+    defer master_mutex.unlock();
+    master_settings.volume_percent = percent;
+}
+
+pub fn setCompressorEnabled(enabled: bool) void {
+    master_mutex.lock();
+    defer master_mutex.unlock();
+    master_settings.compressor_enabled = enabled;
+}
+
+// Setting specific values implies wanting the compressor active, so this
+// enables it too rather than requiring a separate !compressor on afterward.
+pub fn setCompressorParams(threshold_percent: u32, ratio: f64, makeup: f64) void {
+    master_mutex.lock();
+    defer master_mutex.unlock();
+    master_settings.compressor_threshold_percent = threshold_percent;
+    master_settings.compressor_ratio = ratio;
+    master_settings.compressor_makeup = makeup;
+    master_settings.compressor_enabled = true;
+}
+
 pub const PlayerCtx = struct {
     allocator: std.mem.Allocator,
     ptt_key: []const u8,
@@ -220,8 +265,11 @@ pub fn runAndTrack(allocator: std.mem.Allocator, argv: []const []const u8) !void
 }
 
 fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, reverb: bool) !void {
-    // Neither effect active: same lightweight, format-specific fast paths as before.
-    if (effect == .none and !reverb) {
+    const master = getMasterSettings();
+    const needs_master_processing = master.volume_percent != 100 or master.compressor_enabled;
+
+    // Nothing active at all: same lightweight, format-specific fast paths as before.
+    if (effect == .none and !reverb and !needs_master_processing) {
         if (std.mem.endsWith(u8, sound_path, ".wav")) {
             return runAndTrack(ctx.allocator, &.{ "paplay", "--device", ctx.sink, sound_path });
         }
@@ -231,14 +279,7 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
         return runAndTrack(ctx.allocator, &.{ "ffmpeg", "-nostdin", "-loglevel", "error", "-i", sound_path, "-f", "pulse", ctx.sink });
     }
 
-    // At least one of {pitch/speed, reverb} is active - route everything through
-    // one or more temp-file stages (plain file I/O, no live-device timing
-    // involved), then play the final result through the same paplay path
-    // already proven reliable. Writing effect-processed audio straight to the
-    // live pulse sink was the actual bug behind sped-up clips sometimes not
-    // being audible: ffmpeg can exit right after handing off the last chunk,
-    // before PulseAudio has actually finished draining it.
-    var temp_paths: [2][]const u8 = undefined;
+    var temp_paths: [3][]const u8 = undefined;
     var temp_count: usize = 0;
     defer {
         var i: usize = 0;
@@ -293,6 +334,44 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
 
         const tmp_path = try std.fmt.allocPrint(ctx.allocator, "/tmp/soundbot_reverb_{d}.wav", .{std.time.milliTimestamp()});
         try runAndTrack(ctx.allocator, &.{ "sox", current_path, tmp_path, "reverb", amount_arg });
+
+        temp_paths[temp_count] = tmp_path;
+        temp_count += 1;
+        current_path = tmp_path;
+    }
+
+    if (needs_master_processing) {
+        // Compressor first, then volume - even out the dynamic range, then
+        // apply the final overall gain on top of that, rather than the other
+        // way around. Threshold is kept on the same 0-100 scale as everything
+        // else in this bot and converted to ffmpeg's actual linear 0-1 range
+        // here, rather than exposing that raw range directly in chat commands.
+        var filter_buf: [192]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&filter_buf);
+        const w = fbs.writer();
+
+        var wrote_any = false;
+        if (master.compressor_enabled) {
+            const threshold_linear = @as(f64, @floatFromInt(master.compressor_threshold_percent)) / 100.0;
+            try w.print(
+                "acompressor=threshold={d:.4}:ratio={d:.2}:attack=20:release=250:makeup={d:.2}",
+                .{ threshold_linear, master.compressor_ratio, master.compressor_makeup },
+            );
+            wrote_any = true;
+        }
+        if (master.volume_percent != 100) {
+            if (wrote_any) try w.writeAll(",");
+            try w.print("volume={d:.3}", .{@as(f64, @floatFromInt(master.volume_percent)) / 100.0});
+        }
+        const filter_arg = fbs.getWritten();
+
+        const tmp_path = try std.fmt.allocPrint(ctx.allocator, "/tmp/soundbot_master_{d}.wav", .{std.time.milliTimestamp()});
+        try runAndTrack(ctx.allocator, &.{
+            "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+            "-i",     current_path,
+            "-filter:a", filter_arg,
+            tmp_path,
+        });
 
         temp_paths[temp_count] = tmp_path;
         temp_count += 1;

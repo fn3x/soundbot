@@ -118,6 +118,17 @@ docker compose -f docker-compose.yml -f docker-compose.soundbot.yml up -d
   reverby, or reverby on its own
 - `!reverbamount <0-100>` — how much reverb, when it does (50 by default; maps
   directly to sox's "reverberance" parameter)
+- `!volume <0-100>` — overall volume (100 by default). Unlike `!chance`/`!chancereverb`,
+  this isn't randomly rolled and isn't exempted for `!yt` audio - it's a
+  deliberate, persistent setting that applies to absolutely everything
+- `!compressor on`/`!compressor off` — evens out loud/quiet sounds (off by
+  default). `!compressor <threshold 1-100> <ratio 1-20> <makeup 1-64>` tunes
+  and enables it in one step, e.g. `!compressor 10 4 1` (the defaults).
+  Threshold is on the same 0-100 scale as everything else in this bot,
+  converted internally to ffmpeg's actual linear 0-1 range rather than
+  exposing that directly. Attack (20ms) and release (250ms) stay fixed -
+  three tunable values felt like the right amount of knobs, not every
+  parameter `acompressor` supports.
 - `!tts[g|b|jo|ma|sa|am|em|ju|ni|ca|m|t] <text>` —
   text-to-speech via Amazon Polly: Giorgio, Brian, Joanna, Matthew, Salli, Amy,
   Emma, Justin, Nicole, Carla, Maxim, Tatyana (all standard-engine, non-neural voices). `!tts <text>`
