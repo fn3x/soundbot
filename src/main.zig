@@ -58,6 +58,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     const cfg = try Config.load(allocator);
+    youtube.setCookiesPath(cfg.yt_cookies_path);
 
     playback.initQueue(allocator);
 
