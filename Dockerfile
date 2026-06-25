@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pulseaudio pulseaudio-utils libasound2-plugins alsa-utils \
     ffmpeg xdotool mpg123 sox libsox-fmt-all \
     openssh-client sshpass \
-    ca-certificates curl util-linux awscli \
+    ca-certificates curl unzip util-linux awscli \
     libnotify4 libatomic1 libnspr4 libnss3 \
     libatk1.0-0 libatk-bridge2.0-0 libcups2 libatspi2.0-0 \
     libxcomposite1 \
@@ -58,6 +58,16 @@ RUN mkdir -p ./sounds ./teamspeak-client
 # install is needed - it just needs ffmpeg on PATH, which is already installed.
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
     && chmod a+rx /usr/local/bin/yt-dlp
+
+# As of yt-dlp 2025.11.12, an external JS runtime is a hard requirement for
+# full YouTube support - without one, only image formats are available
+# ("Requested format is not available"). Deno is yt-dlp's top recommendation
+# (sandboxed, no filesystem/network access by default) and is auto-detected
+# with zero extra flags once it's on PATH. The yt-dlp-ejs scripts that drive
+# it are already bundled into the standalone binary above, so nothing else is
+# needed beyond the runtime itself. DENO_INSTALL=/usr/local puts the binary
+# straight at /usr/local/bin/deno, already on PATH.
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
 
 # Right ownership on appuser's home dir *before* a volume ever gets mounted
 # there - Docker copies a fresh named volume's initial permissions from

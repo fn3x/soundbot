@@ -49,6 +49,18 @@ fn looksLikeUrl(s: []const u8) bool {
     return std.mem.startsWith(u8, s, "http://") or std.mem.startsWith(u8, s, "https://");
 }
 
+// Docker secrets are always read-only by design, but yt-dlp tries to write
+// updated cookies back to the same file it read them from when it's done
+// (confirmed the hard way: "OSError: Read-only file system" mid-run). Copying
+// to a writable temp file avoids that crash entirely without ever touching
+// the actual secret - the copy is just thrown away afterward.
+fn copyToWritableTemp(allocator: std.mem.Allocator, source_path: []const u8) ![]const u8 {
+    const tmp_path = try std.fmt.allocPrint(allocator, "/tmp/soundbot_yt_cookies_{d}.txt", .{std.time.milliTimestamp()});
+    errdefer allocator.free(tmp_path);
+    try std.fs.cwd().copyFile(source_path, std.fs.cwd(), tmp_path, .{});
+    return tmp_path;
+}
+
 fn downloadAudio(allocator: std.mem.Allocator, query_or_url: []const u8, seconds: u32, out_path: []const u8) !void {
     // A bare URL is used as-is; anything else is treated as a YouTube search,
     // taking the top result - lets people type a title instead of pasting a link.
@@ -58,17 +70,29 @@ fn downloadAudio(allocator: std.mem.Allocator, query_or_url: []const u8, seconds
         try std.fmt.allocPrint(allocator, "ytsearch1:{s}", .{query_or_url});
     defer allocator.free(target);
 
+    var cookies_temp_path: ?[]const u8 = null;
+    defer if (cookies_temp_path) |p| {
+        std.fs.cwd().deleteFile(p) catch {};
+        allocator.free(p);
+    };
+
     var argv = std.ArrayList([]const u8).init(allocator);
     defer argv.deinit();
     try argv.appendSlice(&.{
         "yt-dlp",
         "--no-playlist",
         "-x",
-        "--audio-format", "mp3",
+        "--audio-format",
+        "mp3",
     });
 
     if (resolveCookiesPath()) |cookies_path| {
-        try argv.appendSlice(&.{ "--cookies", cookies_path });
+        if (copyToWritableTemp(allocator, cookies_path)) |tmp| {
+            cookies_temp_path = tmp;
+            try argv.appendSlice(&.{ "--cookies", tmp });
+        } else |err| {
+            std.debug.print("[soundbot] failed to copy cookies to writable temp file, continuing without cookies: {}\n", .{err});
+        }
     }
 
     // "*0-N" downloads only that exact time range (the "*" means real
