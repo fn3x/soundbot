@@ -52,7 +52,7 @@ const EffectSettings = struct {
 var effect_mutex: std.Thread.Mutex = .{};
 var effect_settings: EffectSettings = .{};
 
-fn getEffectSettings() EffectSettings {
+pub fn getEffectSettings() EffectSettings {
     effect_mutex.lock();
     defer effect_mutex.unlock();
     return effect_settings;
@@ -68,6 +68,12 @@ pub fn setEffectSlow(factor: f64) void {
     effect_mutex.lock();
     defer effect_mutex.unlock();
     effect_settings.slow_factor = factor;
+}
+
+pub fn resetEffectsSettings() void {
+    effect_mutex.lock();
+    defer effect_mutex.unlock();
+    effect_settings = .{};
 }
 
 pub fn setEffectFast(factor: f64) void {
@@ -117,10 +123,16 @@ const MasterSettings = struct {
 var master_mutex: std.Thread.Mutex = .{};
 var master_settings: MasterSettings = .{};
 
-fn getMasterSettings() MasterSettings {
+pub fn getMasterSettings() MasterSettings {
     master_mutex.lock();
     defer master_mutex.unlock();
     return master_settings;
+}
+
+pub fn resetMasterSettings() void {
+    master_mutex.lock();
+    defer master_mutex.unlock();
+    master_settings = .{};
 }
 
 pub fn setVolume(percent: u32) void {
@@ -229,10 +241,9 @@ fn playOne(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, reverb
 // be at, rather than assuming a fixed value.
 fn probeSampleRate(allocator: std.mem.Allocator, sound_path: []const u8) !u32 {
     var child = std.process.Child.init(&.{
-        "ffprobe", "-v",              "error",
-        "-select_streams", "a:0",
-        "-show_entries", "stream=sample_rate",
-        "-of", "csv=p=0",
+        "ffprobe",            "-v",  "error",
+        "-select_streams",    "a:0", "-show_entries",
+        "stream=sample_rate", "-of", "csv=p=0",
         sound_path,
     }, allocator);
     child.stdin_behavior = .Ignore;
@@ -314,10 +325,8 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
 
         const tmp_path = try std.fmt.allocPrint(ctx.allocator, "/tmp/soundbot_pitch_{d}.wav", .{std.time.milliTimestamp()});
         try runAndTrack(ctx.allocator, &.{
-            "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
-            "-i",     current_path,
-            "-filter:a", filter_arg,
-            tmp_path,
+            "ffmpeg", "-nostdin",   "-loglevel", "error",    "-y",
+            "-i",     current_path, "-filter:a", filter_arg, tmp_path,
         });
 
         temp_paths[temp_count] = tmp_path;
@@ -367,10 +376,8 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
 
         const tmp_path = try std.fmt.allocPrint(ctx.allocator, "/tmp/soundbot_master_{d}.wav", .{std.time.milliTimestamp()});
         try runAndTrack(ctx.allocator, &.{
-            "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
-            "-i",     current_path,
-            "-filter:a", filter_arg,
-            tmp_path,
+            "ffmpeg", "-nostdin",   "-loglevel", "error",    "-y",
+            "-i",     current_path, "-filter:a", filter_arg, tmp_path,
         });
 
         temp_paths[temp_count] = tmp_path;

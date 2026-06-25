@@ -26,6 +26,8 @@ const help_text =
     \\* !chancereverb <0-100> - % chance a sound gets reverb (independent of !chance)
     \\* !reverbamount <0-100> - how much reverb, when it does
     \\* !compressor on/off, or !compressor <threshold 1-100> <ratio 1-20> <makeup 1-64>
+    \\* !default - reset effect and master settings to default values
+    \\* !status - show current effect and master settings
     \\* !help - this message
 ;
 
@@ -51,6 +53,26 @@ fn installShutdownHandler() !void {
     };
     try std.posix.sigaction(std.posix.SIG.INT, &act, null);
     try std.posix.sigaction(std.posix.SIG.TERM, &act, null);
+}
+
+fn buildStatusText(allocator: std.mem.Allocator) ![]u8 {
+    const effect_settings = playback.getEffectSettings();
+    const master_settings = playback.getMasterSettings();
+
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+    const w = out.writer();
+
+    try w.writeAll("Current settings:\n\n");
+
+    inline for (std.meta.fields(@TypeOf(effect_settings))) |field| {
+        try w.print("* {s} = {any}\n", .{ field.name, @field(effect_settings, field.name) });
+    }
+    inline for (std.meta.fields(@TypeOf(master_settings))) |field| {
+        try w.print("* {s} = {any}\n", .{ field.name, @field(master_settings, field.name) });
+    }
+
+    return out.toOwnedSlice();
 }
 
 pub fn main() !void {
@@ -178,6 +200,23 @@ pub fn main() !void {
 
         if (std.mem.eql(u8, name, "help")) {
             query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, help_text);
+            continue;
+        }
+
+        if (std.mem.eql(u8, name, "default")) {
+            playback.resetEffectsSettings();
+            playback.resetMasterSettings();
+            std.debug.print("[soundbot] Default settings restored.\n", .{});
+            query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "Default settings restored.");
+            continue;
+        }
+
+        if (std.mem.eql(u8, name, "status")) {
+            const status_msg = buildStatusText(allocator) catch |err| {
+                std.debug.print("[soundbot] failed to build status list: {}\n", .{err});
+                continue;
+            };
+            query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, status_msg);
             continue;
         }
 
