@@ -1,17 +1,14 @@
 const std = @import("std");
 const playback = @import("playback.zig");
 
-// ---- Playback from YouTube (or anything else yt-dlp supports) ----
-// yt-dlp itself handles is its own large surface area - format selection,
-// site-specific extraction, etc. - so this stays thin: build a reasonable
-// command line, let yt-dlp do the work, queue the result like any other sound.
-//
-// Worth knowing: yt-dlp supports over a thousand sites, not just YouTube, so
-// a bare URL to practically anything it recognizes will work here, not only
-// youtube.com links.
-
 var settings_mutex: std.Thread.Mutex = .{};
 var max_seconds: u32 = 0; // 0 = no cap, play the whole thing (the default - good for songs)
+var cookies_path_override: ?[]const u8 = null;
+
+// Fallback when no override is set - if a cookies.txt file has been mounted
+// in at this conventional path (see README), it's still picked up
+// automatically, same as before TS_YT_COOKIES_PATH existed.
+const default_cookies_path = "/opt/soundbot/cookies.txt";
 
 pub fn setMaxSeconds(seconds: u32) void {
     settings_mutex.lock();
@@ -23,6 +20,29 @@ fn getMaxSeconds() u32 {
     settings_mutex.lock();
     defer settings_mutex.unlock();
     return max_seconds;
+}
+
+// Set once at startup from TS_YT_COOKIES_PATH (see main.zig) - null is valid
+// and means "no override configured", not "explicitly disabled".
+pub fn setCookiesPath(path: ?[]const u8) void {
+    settings_mutex.lock();
+    defer settings_mutex.unlock();
+    cookies_path_override = path;
+}
+
+// An explicitly configured path is trusted as-is (if it's wrong, yt-dlp's own
+// error is more informative than silently skipping it). The conventional
+// fallback path is only used if it's actually there, since unlike an explicit
+// env var, its mere presence is the only signal that it's meant to be used.
+fn resolveCookiesPath() ?[]const u8 {
+    settings_mutex.lock();
+    const override = cookies_path_override;
+    settings_mutex.unlock();
+
+    if (override) |p| return p;
+
+    std.fs.cwd().access(default_cookies_path, .{}) catch return null;
+    return default_cookies_path;
 }
 
 fn looksLikeUrl(s: []const u8) bool {
@@ -45,13 +65,11 @@ fn downloadAudio(allocator: std.mem.Allocator, query_or_url: []const u8, seconds
         "--no-playlist",
         "-x",
         "--audio-format", "mp3",
-        // YouTube's bot-detection ("Sign in to confirm you're not a bot") hits
-        // datacenter/VPS IPs - exactly what this runs on - especially hard.
-        // Spoofing the Android client is the most commonly reported fix that
-        // doesn't need real account cookies; not guaranteed, since this kind
-        // of workaround can stop working whenever YouTube adjusts its checks.
-        "--extractor-args", "youtube:player_client=android",
     });
+
+    if (resolveCookiesPath()) |cookies_path| {
+        try argv.appendSlice(&.{ "--cookies", cookies_path });
+    }
 
     // "*0-N" downloads only that exact time range (the "*" means real
     // timestamps, not chapter markers). Only added when a cap is actually set -
@@ -97,7 +115,7 @@ pub fn handleYtCommand(allocator: std.mem.Allocator, raw_query: []const u8) void
         return;
     };
 
-    playback.enqueueSound(out_path, true) catch |err| {
+    playback.enqueueSound(out_path, true, true) catch |err| {
         std.debug.print("[soundbot] failed to queue yt-dlp output: {}\n", .{err});
         allocator.free(out_path);
     };

@@ -136,6 +136,46 @@ docker compose -f docker-compose.yml -f docker-compose.soundbot.yml up -d
   just YouTube, so this isn't actually restricted to youtube.com links -
   anything yt-dlp recognizes will work.
 
+**If `!yt` fails with "Sign in to confirm you're not a bot"**: this is YouTube's
+bot-detection, and it hits datacenter/VPS IPs (exactly what this runs on)
+especially hard. The bot already spoofs the Android client as the most
+commonly reported fix that needs no credentials - if that's not enough for a
+given video, the more reliable fallback is supplying real cookies from a
+logged-in YouTube account:
+ 
+1. On your own PC, while logged into YouTube in a browser, export cookies to a
+   `cookies.txt` file (a "Get cookies.txt" browser extension is the easiest way).
+2. Copy that file onto the VPS, next to `docker-compose.soundbot.yml`, named
+   exactly `cookies.txt`.
+3. That's it - `docker-compose.soundbot.yml` already declares it as a proper
+   Docker Compose **secret** (not a generic bind-mount), mounted read-only at
+   `/run/secrets/yt_cookies` with tighter default permissions than a regular
+   volume gets. `TS_YT_COOKIES_PATH` already defaults to that path.
+4. `docker compose -f docker-compose.yml -f docker-compose.soundbot.yml up -d`
+   to pick it up.
+
+**Important behavior change**: because the secret is declared at the top level,
+`cookies.txt` is now a file Compose expects to exist for *any* `up`, not just
+when you actually want cookies enabled - if you don't want to use this feature
+yet, create an empty placeholder (`touch cookies.txt`) so Compose doesn't
+refuse to start the whole stack over a missing file. An empty file is harmless
+- yt-dlp just finds no cookies in it and proceeds without authentication,
+same as if `TS_YT_COOKIES_PATH` were never set at all.
+If you'd rather avoid that requirement entirely, the bot still also checks the
+old conventional bind-mount path (`/opt/soundbot/cookies.txt`) as a fallback if
+you set things up that way instead - but the secret is the better-practice
+default now.
+ 
+Worth deciding deliberately rather than defaulting into it: this puts a real
+account's session on the server, with some risk of that account getting
+rate-limited or flagged if it's used this way a lot. Also worth knowing:
+exported cookies are a frozen snapshot, not a live link to your browser
+session - they'll eventually stop working as Google rotates session state
+server-side, and `!yt` failing with this same error again later is the
+symptom, not a new bug. Re-exporting a fresh `cookies.txt` is the fix each
+time. A secondary account dedicated to this is worth considering over your
+main one, given that recurring need.
+
 ## Logs
 
 ```bash

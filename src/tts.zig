@@ -97,7 +97,7 @@ pub fn handleTtsCommand(allocator: std.mem.Allocator, voice_id: []const u8, engi
         return;
     };
 
-    playback.enqueueSound(out_path, true) catch |err| {
+    playback.enqueueSound(out_path, true, false) catch |err| {
         std.debug.print("[soundbot] failed to queue tts output: {}\n", .{err});
         allocator.free(out_path);
     };

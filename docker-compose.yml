@@ -21,7 +21,11 @@ services:
       # For tts (Amazon Polly via the AWS CLI)
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-eu-central-1}
+      # For bypassing youtube restrictions
+      - TS_YT_COOKIES_PATH=${TS_YT_COOKIES_PATH:-/run/secrets/yt_cookies}
+    secrets:
+      - yt_cookies
     volumes:
       - ./teamspeak-client:/opt/soundbot/teamspeak-client:ro
       - ./sounds:/opt/soundbot/sounds
@@ -31,6 +35,10 @@ services:
       # Consider removing this once everything's confirmed working, or at least
       # firewalling it off rather than leaving it open indefinitely.
       - "5900:5900"
+
+secrets:
+  yt_cookies:
+    file: ./yt_cookies.txt
 
 volumes:
   soundbot-ts-profile:

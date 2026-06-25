@@ -11,6 +11,7 @@ pub const Config = struct {
     sink: []const u8,
     ptt_key: []const u8,
     voice_nickname: []const u8,
+    yt_cookies_path: ?[]const u8,
 
     pub fn load(allocator: std.mem.Allocator) !Config {
         return Config{
@@ -24,6 +25,7 @@ pub const Config = struct {
             .sink = try getEnvOr(allocator, "TS_SINK", "ts_bot_sink"),
             .ptt_key = try getEnvOr(allocator, "TS_PTT_KEY", "F12"),
             .voice_nickname = try getEnvRequired(allocator, "TS_VOICE_NICKNAME"),
+            .yt_cookies_path = try getEnvOptional(allocator, "TS_YT_COOKIES_PATH"),
         };
     }
 };
@@ -33,6 +35,18 @@ fn getEnvOr(allocator: std.mem.Allocator, name: []const u8, default: []const u8)
         error.EnvironmentVariableNotFound => try allocator.dupe(u8, default),
         else => return err,
     };
+}
+
+fn getEnvOptional(allocator: std.mem.Allocator, name: []const u8) !?[]const u8 {
+    const value = std.process.getEnvVarOwned(allocator, name) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return null,
+        else => return err,
+    };
+    if (value.len == 0) {
+        allocator.free(value);
+        return null;
+    }
+    return value;
 }
 
 fn getEnvRequired(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {

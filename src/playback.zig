@@ -107,9 +107,9 @@ pub const PlayerCtx = struct {
     sink: []const u8,
 };
 
-pub fn enqueueSound(sound_path: []const u8, delete_after: bool) !void {
-    const effect = rollEffect();
-    const reverb = rollReverb();
+pub fn enqueueSound(sound_path: []const u8, delete_after: bool, skip_effects: bool) !void {
+    const effect: Effect = if (skip_effects) .none else rollEffect();
+    const reverb: bool = if (skip_effects) false else rollReverb();
     queue_mutex.lock();
     defer queue_mutex.unlock();
     try sound_queue.append(.{ .sound_path = sound_path, .effect = effect, .reverb = reverb, .delete_after = delete_after });
@@ -304,12 +304,12 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
 
 pub fn triggerSound(allocator: std.mem.Allocator, sounds_dir: []const u8, name: []const u8) !void {
     if (try sounds.findSoundFile(allocator, sounds_dir, name)) |path| {
-        try enqueueSound(path, false);
+        try enqueueSound(path, false, false);
         return;
     }
 
     if (try sounds.findSoundFileFamily(allocator, sounds_dir, name)) |path| {
-        try enqueueSound(path, false);
+        try enqueueSound(path, false, false);
         return;
     }
 
