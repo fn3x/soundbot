@@ -13,6 +13,7 @@ const help_text =
     \\Commands:
     \\
     \\* !<name> - play a sound (see !sounds for the list)
+    \\* !skip - skip current sound or cancel an in-progress download; queue keeps playing
     \\* !stop - clear the queue, stop current playback
     \\* !sounds - list available sound triggers
     \\* !voices - list available TTS voices
@@ -216,8 +217,17 @@ pub fn main() !void {
             continue;
         }
 
+        if (std.mem.eql(u8, name, "skip")) {
+            switch (playback.skipCurrent()) {
+                .nothing => query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "Nothing is currently playing or downloading to skip."),
+                .playback => query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "Skipped - playing the next sound in queue."),
+                .download => query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "Cancelled the in-progress download/synthesis."),
+            }
+            continue;
+        }
+
         if (std.mem.eql(u8, name, "default")) {
-            playback.resetEffectsSettings();
+            playback.resetEffectSettings();
             playback.resetMasterSettings();
             std.debug.print("[soundbot] Default settings restored.\n", .{});
             query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "Default settings restored.");
@@ -274,20 +284,47 @@ pub fn main() !void {
 
         if (tts.findTtsVoice(name)) |voice_id| {
             const text = std.mem.trim(u8, after_bang[name_end..], " \t");
-            tts.handleTtsCommand(allocator, voice_id, null, text);
+            const owned_text = allocator.dupe(u8, text) catch |err| {
+                std.debug.print("[soundbot] tts: failed to allocate: {}\n", .{err});
+                continue;
+            };
+            const thread = std.Thread.spawn(.{}, tts.handleTtsCommandThread, .{ allocator, voice_id, null, owned_text }) catch |err| {
+                std.debug.print("[soundbot] failed to spawn tts thread: {}\n", .{err});
+                allocator.free(owned_text);
+                continue;
+            };
+            thread.detach();
             continue;
         }
 
         if (std.mem.eql(u8, name, "tts")) {
             const text = std.mem.trim(u8, after_bang[name_end..], " \t");
             const voice_id = tts.tts_voices[std.crypto.random.intRangeLessThan(usize, 0, tts.tts_voices.len)].voice_id;
-            tts.handleTtsCommand(allocator, voice_id, null, text);
+            const owned_text = allocator.dupe(u8, text) catch |err| {
+                std.debug.print("[soundbot] tts: failed to allocate: {}\n", .{err});
+                continue;
+            };
+            const thread = std.Thread.spawn(.{}, tts.handleTtsCommandThread, .{ allocator, voice_id, null, owned_text }) catch |err| {
+                std.debug.print("[soundbot] failed to spawn tts thread: {}\n", .{err});
+                allocator.free(owned_text);
+                continue;
+            };
+            thread.detach();
             continue;
         }
 
         if (std.mem.eql(u8, name, "yt")) {
-            const yt_query = std.mem.trim(u8, after_bang[name_end..], " \t");
-            youtube.handleYtCommand(allocator, yt_query);
+            const query_text = std.mem.trim(u8, after_bang[name_end..], " \t");
+            const owned_query = allocator.dupe(u8, query_text) catch |err| {
+                std.debug.print("[soundbot] yt: failed to allocate: {}\n", .{err});
+                continue;
+            };
+            const thread = std.Thread.spawn(.{}, youtube.handleYtCommandThread, .{ allocator, owned_query }) catch |err| {
+                std.debug.print("[soundbot] failed to spawn yt download thread: {}\n", .{err});
+                allocator.free(owned_query);
+                continue;
+            };
+            thread.detach();
             continue;
         }
 

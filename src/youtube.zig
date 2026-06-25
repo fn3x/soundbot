@@ -105,7 +105,7 @@ fn downloadAudio(allocator: std.mem.Allocator, query_or_url: []const u8, seconds
     }
 
     try argv.appendSlice(&.{ "-o", out_path, target });
-    try playback.runAndTrack(allocator, argv.items);
+    try playback.runAndTrackDownload(allocator, argv.items);
 
     // runAndTrack doesn't surface yt-dlp's exit code, so check for the actual
     // output file instead - simpler, and it's the only thing that actually
@@ -143,4 +143,17 @@ pub fn handleYtCommand(allocator: std.mem.Allocator, raw_query: []const u8) void
         std.debug.print("[soundbot] failed to queue yt-dlp output: {}\n", .{err});
         allocator.free(out_path);
     };
+}
+
+// Thread entry point - called from main.zig via std.Thread.spawn instead of
+// directly from the chat-dispatch loop. Running the download synchronously in
+// that loop would block it for the whole download, meaning !stop (or any
+// other command) couldn't even be *read* from chat until the download
+// finished or failed - defeating the entire point of being able to stop it.
+// Takes ownership of raw_query (the caller must dupe it first, since the
+// original slice it was trimmed from gets freed at the end of that loop
+// iteration, long before a slow download would actually finish).
+pub fn handleYtCommandThread(allocator: std.mem.Allocator, raw_query: []u8) void {
+    defer allocator.free(raw_query);
+    handleYtCommand(allocator, raw_query);
 }

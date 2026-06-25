@@ -35,6 +35,13 @@ pub fn initQueue(allocator: std.mem.Allocator) void {
 // across threads (that would risk two threads both calling wait() on it).
 var current_pid = std.atomic.Value(i32).init(-1);
 
+// Same idea, but for an in-progress yt-dlp download or TTS synthesis call -
+// kept separate from current_pid since those run on their own background
+// thread (see runAndTrackDownload), concurrently with whatever the player
+// thread might independently be doing, so a single shared pid var would risk
+// the two stepping on each other's tracking.
+var download_pid = std.atomic.Value(i32).init(-1);
+
 // Runtime-tunable via !chance / !slow / !fast / !chancereverb / !reverbamount -
 // not persisted across restarts. slow_factor/fast_factor affect pitch AND speed
 // together (like a record played at the wrong speed) - 0.7 = deeper voice +
@@ -58,6 +65,12 @@ pub fn getEffectSettings() EffectSettings {
     return effect_settings;
 }
 
+pub fn resetEffectSettings() void {
+    effect_mutex.lock();
+    defer effect_mutex.unlock();
+    effect_settings = .{};
+}
+
 pub fn setEffectChance(percent: u32) void {
     effect_mutex.lock();
     defer effect_mutex.unlock();
@@ -68,12 +81,6 @@ pub fn setEffectSlow(factor: f64) void {
     effect_mutex.lock();
     defer effect_mutex.unlock();
     effect_settings.slow_factor = factor;
-}
-
-pub fn resetEffectsSettings() void {
-    effect_mutex.lock();
-    defer effect_mutex.unlock();
-    effect_settings = .{};
 }
 
 pub fn setEffectFast(factor: f64) void {
@@ -189,7 +196,52 @@ pub fn clearQueueAndStopCurrent(allocator: std.mem.Allocator) void {
         };
     }
 
-    std.debug.print("[soundbot] queue cleared, current sound stopped\n", .{});
+    const dl_pid = download_pid.load(.acquire);
+    if (dl_pid != -1) {
+        std.posix.kill(dl_pid, std.posix.SIG.KILL) catch |err| {
+            std.debug.print("[soundbot] failed to kill current download/synthesis: {}\n", .{err});
+        };
+    }
+
+    std.debug.print("[soundbot] queue cleared, current sound/download stopped\n", .{});
+}
+
+// Unlike clearQueueAndStopCurrent, this never touches the rest of the queue -
+// the player thread just moves on to the next item once playOne returns.
+// Kills whichever of {current playback, an in-progress !yt/!tts download or
+// synthesis call} is actually active, since from a user's perspective "skip
+// this" reasonably means either one, regardless of which phase it's in.
+//
+// One known rough edge: if a playback kill lands during one of the brief
+// ffmpeg/sox pre-processing stages of an effect-laden clip (pitch/reverb/
+// compressor), rather than during final playback, the remaining stages still
+// run against the now-truncated intermediate file before reaching paplay -
+// so a skip timed exactly into that narrow window could produce a brief
+// glitch rather than an instant clean cut, rather than failing outright. Not
+// fixed here, since it would need threading a cancellation flag through
+// every stage of playFile for what's normally a very small window in practice.
+pub const SkipResult = enum { nothing, playback, download };
+
+pub fn skipCurrent() SkipResult {
+    var result: SkipResult = .nothing;
+
+    const dl_pid = download_pid.load(.acquire);
+    if (dl_pid != -1) {
+        std.posix.kill(dl_pid, std.posix.SIG.KILL) catch |err| {
+            std.debug.print("[soundbot] failed to skip current download/synthesis: {}\n", .{err});
+        };
+        result = .download;
+    }
+
+    const pid = current_pid.load(.acquire);
+    if (pid != -1) {
+        std.posix.kill(pid, std.posix.SIG.KILL) catch |err| {
+            std.debug.print("[soundbot] failed to skip current playback: {}\n", .{err});
+        };
+        result = .playback; // takes priority in the reported result on the rare chance both were active
+    }
+
+    return result;
 }
 
 pub fn playerLoop(ctx: *const PlayerCtx) void {
@@ -260,19 +312,31 @@ fn probeSampleRate(allocator: std.mem.Allocator, sound_path: []const u8) !u32 {
     return std.fmt.parseInt(u32, trimmed, 10) catch 48000;
 }
 
-pub fn runAndTrack(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+fn runAndTrackPid(allocator: std.mem.Allocator, argv: []const []const u8, pid_var: *std.atomic.Value(i32)) !void {
     var child = std.process.Child.init(argv, allocator);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Inherit;
 
     try child.spawn();
-    current_pid.store(@intCast(child.id), .release);
+    pid_var.store(@intCast(child.id), .release);
     // If a stop command killed it, this just returns (possibly with a non-zero
     // exit status) instead of erroring - either way the caller still releases
-    // the PTT key regardless of why playback stopped.
+    // the PTT key (or otherwise handles cleanup) regardless of why it stopped.
     _ = child.wait() catch {};
-    current_pid.store(-1, .release);
+    pid_var.store(-1, .release);
+}
+
+pub fn runAndTrack(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    return runAndTrackPid(allocator, argv, &current_pid);
+}
+
+// For yt-dlp downloads and TTS synthesis - these run on their own background
+// thread (not the player thread), so tracking their pid separately from
+// current_pid lets !stop kill an in-progress download/synthesis call even
+// while something else is independently playing, and vice versa.
+pub fn runAndTrackDownload(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    return runAndTrackPid(allocator, argv, &download_pid);
 }
 
 fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, reverb: bool) !void {

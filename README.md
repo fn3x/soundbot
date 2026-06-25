@@ -111,6 +111,7 @@ docker compose -f docker-compose.yml -f docker-compose.soundbot.yml up -d
 - `!du` (with `du1.mp3`/`du2.mp3`/... present) — plays one of the numbered siblings at random
 - `!sounds` — replies in chat listing every available trigger name
 - `!stop` — clears the queue, stops whatever's currently playing
+- `!skip` - skip current sound or cancel an in-progress download; queue keeps playing
 - `!join` — moves the bot to your current channel (works from a channel's chat or the "Server" chat tab)
 - `!join <channel_id>` — moves it to a specific channel regardless of where typed
 - `!chance <0-100>` — % chance a played sound gets pitch+speed shifted
@@ -207,3 +208,11 @@ docker logs -f soundbot
 - `!yt` lets anyone in the channel make the bot fetch from the open internet.
   There's a length cap but no rate limit, cooldown, or per-user restriction -
   worth keeping in mind if the server has people you don't fully trust.
+- `!yt`/`!tts*` run on their own background thread specifically so `!stop` can
+  actually interrupt an in-progress download/synthesis call (without that, the
+  chat-reading loop itself would be blocked for the whole call, meaning
+  `!stop` couldn't even be read until it finished anyway). One real limitation
+  from that: if two such calls happen to be in flight at once (e.g. `!yt` and
+  `!ttsb` fired back to back before either finishes), they share a single
+  pid-tracking slot, so `!stop` reliably kills whichever one most recently
+  claimed it, not necessarily both.

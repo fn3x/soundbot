@@ -76,29 +76,41 @@ fn synthesizeTts(allocator: std.mem.Allocator, voice_id: []const u8, engine: ?[]
         try argv.appendSlice(&.{ "--engine", e });
     }
     try argv.append(out_path);
-    try playback.runAndTrack(allocator, argv.items);
+    try playback.runAndTrackDownload(allocator, argv.items);
 }
-
+ 
 pub fn handleTtsCommand(allocator: std.mem.Allocator, voice_id: []const u8, engine: ?[]const u8, raw_text: []const u8) void {
     const text = if (raw_text.len > max_tts_chars) raw_text[0..max_tts_chars] else raw_text;
     if (text.len == 0) {
         std.debug.print("[soundbot] tts command needs some text after it, e.g. !ttsb hello there\n", .{});
         return;
     }
-
+ 
     const out_path = std.fmt.allocPrint(allocator, "/tmp/soundbot_tts_{d}.mp3", .{std.time.milliTimestamp()}) catch |err| {
         std.debug.print("[soundbot] tts failed to build temp path: {}\n", .{err});
         return;
     };
-
+ 
     synthesizeTts(allocator, voice_id, engine, text, out_path) catch |err| {
         std.debug.print("[soundbot] tts synthesis failed: {}\n", .{err});
         allocator.free(out_path);
         return;
     };
-
+ 
     playback.enqueueSound(out_path, true, false) catch |err| {
         std.debug.print("[soundbot] failed to queue tts output: {}\n", .{err});
         allocator.free(out_path);
     };
+}
+ 
+// Thread entry point - same reasoning as youtube.zig's handleYtCommandThread:
+// running this synchronously in the chat-dispatch loop would block it for the
+// whole Polly call, during which !stop couldn't even be read from chat, let
+// alone act on it. voice_id/engine are static/null and don't need freeing;
+// raw_text does, since the caller must dupe it before spawning this (the
+// original slice it was trimmed from is freed at the end of that loop
+// iteration, long before a slow API call would actually return).
+pub fn handleTtsCommandThread(allocator: std.mem.Allocator, voice_id: []const u8, engine: ?[]const u8, raw_text: []u8) void {
+    defer allocator.free(raw_text);
+    handleTtsCommand(allocator, voice_id, engine, raw_text);
 }
