@@ -174,7 +174,7 @@ pub fn main() !void {
     try query.doCommand(allocator, stdin, reader, "servernotifyregister textchannel", "servernotifyregister event=textchannel", .{});
     try query.doCommand(allocator, stdin, reader, "servernotifyregister textserver", "servernotifyregister event=textserver", .{});
 
-    std.debug.print("[soundbot] ready - watching channel {s} for !sound<N>\n", .{cfg.channel_id});
+    std.debug.print("[soundbot] ready - watching channel {s} for commands\n", .{cfg.channel_id});
 
     const keepalive_thread = try std.Thread.spawn(.{}, query.keepaliveLoop, .{stdin});
     keepalive_thread.detach();
@@ -228,7 +228,7 @@ pub fn main() !void {
 
         if (std.mem.eql(u8, name, "default")) {
             playback.resetEffectSettings();
-            playback.resetMasterSettings();
+            playback.resetMasterSettings(allocator, cfg.sink);
             std.debug.print("[soundbot] Default settings restored.\n", .{});
             query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, "Default settings restored.");
             continue;
@@ -461,7 +461,7 @@ pub fn main() !void {
                 query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, err_msg);
                 continue;
             }
-            playback.setVolume(percent);
+            playback.setVolume(allocator, percent, cfg.sink);
             var buf: [64]u8 = undefined;
             const ok_msg = std.fmt.bufPrint(&buf, "Volume set to {d}% (applies to everything)", .{percent}) catch "Volume updated";
             query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, ok_msg);

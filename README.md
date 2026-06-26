@@ -131,7 +131,10 @@ docker compose -f docker-compose.yml -f docker-compose.soundbot.yml up -d
   converted internally to ffmpeg's actual linear 0-1 range rather than
   exposing that directly. Attack (20ms) and release (250ms) stay fixed -
   three tunable values felt like the right amount of knobs, not every
-  parameter `acompressor` supports.
+  parameter `acompressor` supports. Exempted for !yt audio specifically -
+  same reasoning as the random pitch/reverb effects: squashing the dynamics
+  of an entire song is a bigger, more disruptive change than it is on a short
+  clip.
 - `!tts[g|b|jo|ma|sa|am|em|ju|ni|ca|m|t] <text>` —
   text-to-speech via Amazon Polly: Giorgio, Brian, Joanna, Matthew, Salli, Amy,
   Emma, Justin, Nicole, Carla, Maxim, Tatyana (all standard-engine, non-neural voices). `!tts <text>`
