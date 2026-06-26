@@ -71,8 +71,14 @@ fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.lessThan(u8, a, b);
 }
 
-fn lessThanStrMut(_: void, a: []u8, b: []u8) bool {
-    return std.mem.lessThan(u8, a, b);
+fn lessThanByTrailingNumber(_: void, a: []u8, b: []u8) bool {
+    return trailingNumber(a) < trailingNumber(b);
+}
+
+fn trailingNumber(s: []const u8) u64 {
+    var i: usize = s.len;
+    while (i > 0 and std.ascii.isDigit(s[i - 1])) i -= 1;
+    return std.fmt.parseInt(u64, s[i..], 10) catch 0;
 }
 
 // Builds the !sounds reply text, grouping numbered siblings under their shared
@@ -146,7 +152,7 @@ pub fn buildSoundsList(allocator: std.mem.Allocator, sounds_dir: []const u8) ![]
             try out.appendSlice(key);
 
             const members = groups.getPtr(key).?.items;
-            std.mem.sort([]u8, members, {}, lessThanStrMut);
+            std.mem.sort([]u8, members, {}, lessThanByTrailingNumber);
             if (members.len > 0) {
                 try out.appendSlice(" (");
                 for (members, 0..) |m, i| {
