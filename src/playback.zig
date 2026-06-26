@@ -1,13 +1,15 @@
 const std = @import("std");
 const sounds = @import("sounds.zig");
 
-fn runCmd(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    var child = std.process.Child.init(argv, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Inherit;
-    try child.spawn();
-    _ = try child.wait();
+fn runCmd(io: std.Io, argv: []const []const u8) !void {
+    var child = try std.process.spawn(io, .{
+        .argv = argv,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .inherit,
+    });
+
+    _ = try child.wait(io);
 }
 
 const Effect = enum { none, slow, fast };
@@ -20,14 +22,14 @@ const QueueItem = struct {
     delete_after: bool, // true for dynamically-generated files (TTS output) that should be cleaned up after playing
 };
 
-var queue_mutex: std.Thread.Mutex = .{};
-var queue_cond: std.Thread.Condition = .{};
+var queue_mutex: std.Io.Mutex = .init;
+var queue_cond: std.Io.Condition = .init;
 var sound_queue: std.ArrayList(QueueItem) = undefined; // initialized via initQueue()
 
 // QueueItem is private to this module, so main() can't construct
 // std.ArrayList(QueueItem) directly - this is the public init entry point instead.
-pub fn initQueue(allocator: std.mem.Allocator) void {
-    sound_queue = std.ArrayList(QueueItem).init(allocator);
+pub fn initQueue() void {
+    sound_queue = .empty;
 }
 
 // pid of the currently-running ffmpeg, or -1 if nothing is playing right now.
@@ -57,61 +59,85 @@ const EffectSettings = struct {
     reverb_amount: u32 = 80, // maps directly to sox's reverb "reverberance" 0-100
 };
 
-var effect_mutex: std.Thread.Mutex = .{};
+var effect_mutex: std.Io.Mutex = .init;
 var effect_settings: EffectSettings = .{};
 
-pub fn getEffectSettings() EffectSettings {
-    effect_mutex.lock();
-    defer effect_mutex.unlock();
+pub fn getEffectSettings(io: std.Io) EffectSettings {
+    effect_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] Error locking effect mutex on getting effects {}", .{err});
+        return .{};
+    };
+    defer effect_mutex.unlock(io);
     return effect_settings;
 }
 
-pub fn resetEffectSettings() void {
-    effect_mutex.lock();
-    defer effect_mutex.unlock();
+pub fn resetEffectSettings(io: std.Io) void {
+    effect_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] Error locking effect mutex on reset effects {}", .{err});
+        return;
+    };
+    defer effect_mutex.unlock(io);
     effect_settings = .{};
 }
 
-pub fn setEffectChance(percent: u32) void {
-    effect_mutex.lock();
-    defer effect_mutex.unlock();
+pub fn setEffectChance(io: std.Io, percent: u32) void {
+    effect_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] Error locking effect mutex on effect chance {}", .{err});
+        return;
+    };
+    defer effect_mutex.unlock(io);
     effect_settings.chance_percent = percent;
 }
 
-pub fn setEffectSlow(factor: f64) void {
-    effect_mutex.lock();
-    defer effect_mutex.unlock();
+pub fn setEffectSlow(io: std.Io, factor: f64) void {
+    effect_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] Error locking effect mutex on slow effect {}", .{err});
+        return;
+    };
+    defer effect_mutex.unlock(io);
     effect_settings.slow_factor = factor;
 }
 
-pub fn setEffectFast(factor: f64) void {
-    effect_mutex.lock();
-    defer effect_mutex.unlock();
+pub fn setEffectFast(io: std.Io, factor: f64) void {
+    effect_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] Error locking effect mutex on fast effect {}", .{err});
+        return;
+    };
+    defer effect_mutex.unlock(io);
     effect_settings.fast_factor = factor;
 }
 
-pub fn setReverbChance(percent: u32) void {
-    effect_mutex.lock();
-    defer effect_mutex.unlock();
+pub fn setReverbChance(io: std.Io, percent: u32) void {
+    effect_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] Error locking effect mutex on reverb chance {}", .{err});
+        return;
+    };
+    defer effect_mutex.unlock(io);
     effect_settings.reverb_chance_percent = percent;
 }
 
-pub fn setReverbAmount(amount: u32) void {
-    effect_mutex.lock();
-    defer effect_mutex.unlock();
+pub fn setReverbAmount(io: std.Io, amount: u32) void {
+    effect_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] Error locking effect mutex on reverb amount {}", .{err});
+        return;
+    };
+    defer effect_mutex.unlock(io);
     effect_settings.reverb_amount = amount;
 }
 
-fn rollEffect() Effect {
-    const settings = getEffectSettings();
-    const roll = std.crypto.random.intRangeLessThan(u32, 0, 100);
+// rollEffect/rollReverb now take `rand: std.Random` rather than reaching for
+// the removed std.crypto.random global - see sounds.zig for the fuller note
+// on how that gets constructed (std.Random.IoSource wrapping the caller's io).
+fn rollEffect(io: std.Io, rand: std.Random) Effect {
+    const settings = getEffectSettings(io);
+    const roll = rand.intRangeLessThan(u32, 0, 100);
     if (roll >= settings.chance_percent) return .none;
-    return if (std.crypto.random.boolean()) .slow else .fast;
+    return if (rand.boolean()) .slow else .fast;
 }
 
-fn rollReverb() bool {
-    const settings = getEffectSettings();
-    const roll = std.crypto.random.intRangeLessThan(u32, 0, 100);
+fn rollReverb(io: std.Io, rand: std.Random) bool {
+    const settings = getEffectSettings(io);
+    const roll = rand.intRangeLessThan(u32, 0, 100);
     return roll < settings.reverb_chance_percent;
 }
 
@@ -123,55 +149,71 @@ fn rollReverb() bool {
 // compressor squashing the dynamics of an entire song is a bigger, more
 // disruptive change than it is on a short clip.
 const MasterSettings = struct {
-    volume_percent: u32 = 80,
+    volume_percent: u32 = 100,
     compressor_enabled: bool = false,
     compressor_threshold_percent: u32 = 10, // -> linear 0.1 (~-20dB) when passed to acompressor
     compressor_ratio: f64 = 4,
     compressor_makeup: f64 = 1,
 };
 
-var master_mutex: std.Thread.Mutex = .{};
+var master_mutex: std.Io.Mutex = .init;
 var master_settings: MasterSettings = .{};
 
-pub fn getMasterSettings() MasterSettings {
-    master_mutex.lock();
-    defer master_mutex.unlock();
+// pub for !status - same reasoning as getEffectSettings above.
+pub fn getMasterSettings(io: std.Io) MasterSettings {
+    master_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] Error locking master settings mutex on getting master settings {}", .{err});
+        return .{};
+    };
+    defer master_mutex.unlock(io);
     return master_settings;
 }
 
-pub fn resetMasterSettings(allocator: std.mem.Allocator, sink: []const u8) void {
-    master_mutex.lock();
+pub fn resetMasterSettings(io: std.Io, sink: []const u8) void {
+    master_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] Error resetting master settings mutex {}", .{err});
+        return;
+    };
     master_settings = .{};
-    master_mutex.unlock();
-    applySinkVolume(allocator, sink, master_settings.volume_percent);
+    master_mutex.unlock(io);
+    applySinkVolume(io, sink, master_settings.volume_percent);
 }
 
-pub fn setVolume(allocator: std.mem.Allocator, percent: u32, sink: []const u8) void {
-    master_mutex.lock();
+pub fn setVolume(io: std.Io, percent: u32, sink: []const u8) void {
+    master_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] Error setting master settings volume mutex {}", .{err});
+        return;
+    };
     master_settings.volume_percent = percent;
-    master_mutex.unlock();
-    applySinkVolume(allocator, sink, percent);
+    master_mutex.unlock(io);
+    applySinkVolume(io, sink, percent);
 }
 
-fn applySinkVolume(allocator: std.mem.Allocator, sink: []const u8, percent: u32) void {
+fn applySinkVolume(io: std.Io, sink: []const u8, percent: u32) void {
     var buf: [8]u8 = undefined;
     const percent_arg = std.fmt.bufPrint(&buf, "{d}%", .{percent}) catch return;
-    runCmd(allocator, &.{ "pactl", "set-sink-volume", sink, percent_arg }) catch |err| {
+    runCmd(io, &.{ "pactl", "set-sink-volume", sink, percent_arg }) catch |err| {
         std.debug.print("[soundbot] failed to set live sink volume: {}\n", .{err});
     };
 }
 
-pub fn setCompressorEnabled(enabled: bool) void {
-    master_mutex.lock();
-    defer master_mutex.unlock();
+pub fn setCompressorEnabled(io: std.Io, enabled: bool) void {
+    master_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] Error enabling master settings compressor mutex {}", .{err});
+        return;
+    };
+    defer master_mutex.unlock(io);
     master_settings.compressor_enabled = enabled;
 }
 
 // Setting specific values implies wanting the compressor active, so this
 // enables it too rather than requiring a separate !compressor on afterward.
-pub fn setCompressorParams(threshold_percent: u32, ratio: f64, makeup: f64) void {
-    master_mutex.lock();
-    defer master_mutex.unlock();
+pub fn setCompressorParams(io: std.Io, threshold_percent: u32, ratio: f64, makeup: f64) void {
+    master_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] Error setting master settings compressor mutex {}", .{err});
+        return;
+    };
+    defer master_mutex.unlock(io);
     master_settings.compressor_threshold_percent = threshold_percent;
     master_settings.compressor_ratio = ratio;
     master_settings.compressor_makeup = makeup;
@@ -180,27 +222,34 @@ pub fn setCompressorParams(threshold_percent: u32, ratio: f64, makeup: f64) void
 
 pub const PlayerCtx = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     ptt_key: []const u8,
     sink: []const u8,
 };
 
-pub fn enqueueSound(sound_path: []const u8, delete_after: bool, skip_effects: bool) !void {
-    const effect: Effect = if (skip_effects) .none else rollEffect();
-    const reverb: bool = if (skip_effects) false else rollReverb();
-    queue_mutex.lock();
-    defer queue_mutex.unlock();
-    try sound_queue.append(.{ .sound_path = sound_path, .effect = effect, .reverb = reverb, .skip_effects = skip_effects, .delete_after = delete_after });
-    queue_cond.signal();
+pub fn enqueueSound(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, sound_path: []const u8, delete_after: bool, skip_effects: bool) !void {
+    const effect: Effect = if (skip_effects) .none else rollEffect(io, rand);
+    const reverb: bool = if (skip_effects) false else rollReverb(io, rand);
+    queue_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] Error locking queue mutex {}", .{err});
+        return;
+    };
+    defer queue_mutex.unlock(io);
+    try sound_queue.append(allocator, .{ .sound_path = sound_path, .effect = effect, .reverb = reverb, .skip_effects = skip_effects, .delete_after = delete_after });
+    queue_cond.signal(io);
 }
 
-pub fn clearQueueAndStopCurrent(allocator: std.mem.Allocator) void {
-    queue_mutex.lock();
+pub fn clearQueueAndStopCurrent(allocator: std.mem.Allocator, io: std.Io) void {
+    queue_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] Error locking queue mutex on clear {}", .{err});
+        return;
+    };
     for (sound_queue.items) |item| {
-        if (item.delete_after) std.fs.cwd().deleteFile(item.sound_path) catch {};
+        if (item.delete_after) std.Io.Dir.cwd().deleteFile(io, item.sound_path) catch {};
         allocator.free(item.sound_path);
     }
     sound_queue.clearRetainingCapacity();
-    queue_mutex.unlock();
+    queue_mutex.unlock(io);
 
     const pid = current_pid.load(.acquire);
     if (pid != -1) {
@@ -257,17 +306,17 @@ pub fn skipCurrent() SkipResult {
     return result;
 }
 
-pub fn playerLoop(ctx: *const PlayerCtx) void {
+pub fn playerLoop(ctx: *const PlayerCtx) !void {
     while (true) {
-        queue_mutex.lock();
+        try queue_mutex.lock(ctx.io);
         while (sound_queue.items.len == 0) {
-            queue_cond.wait(&queue_mutex);
+            try queue_cond.wait(ctx.io, &queue_mutex);
         }
         const item = sound_queue.orderedRemove(0);
-        queue_mutex.unlock();
+        queue_mutex.unlock(ctx.io);
 
         playOne(ctx, item.sound_path, item.effect, item.reverb, item.skip_effects);
-        if (item.delete_after) std.fs.cwd().deleteFile(item.sound_path) catch {};
+        if (item.delete_after) std.Io.Dir.cwd().deleteFile(ctx.io, item.sound_path) catch {};
         ctx.allocator.free(item.sound_path);
     }
 }
@@ -281,20 +330,20 @@ fn playOne(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, reverb
     const reverb_label: []const u8 = if (reverb) " (reverb)" else "";
     std.debug.print("[soundbot] playing {s}{s}{s}\n", .{ sound_path, effect_label, reverb_label });
 
-    runCmd(ctx.allocator, &.{ "xdotool", "keydown", ctx.ptt_key }) catch |err| {
+    runCmd(ctx.io, &.{ "xdotool", "keydown", ctx.ptt_key }) catch |err| {
         std.debug.print("[soundbot] keydown failed: {}\n", .{err});
     };
     // Short margin so the PTT key has registered before audio starts - shrunk from
     // an earlier, more conservative 200ms. If you ever see the very start of a clip
     // clipped, bump this back up; if not, it can likely go even lower than this.
-    std.time.sleep(50 * std.time.ns_per_ms);
+    ctx.io.sleep(.fromMilliseconds(50), .awake) catch {};
 
     playFile(ctx, sound_path, effect, reverb, skip_effects) catch |err| {
         std.debug.print("[soundbot] playback failed: {}\n", .{err});
     };
 
-    std.time.sleep(50 * std.time.ns_per_ms);
-    runCmd(ctx.allocator, &.{ "xdotool", "keyup", ctx.ptt_key }) catch |err| {
+    ctx.io.sleep(.fromMilliseconds(50), .awake) catch {};
+    runCmd(ctx.io, &.{ "xdotool", "keyup", ctx.ptt_key }) catch |err| {
         std.debug.print("[soundbot] keyup failed: {}\n", .{err});
     };
 }
@@ -304,56 +353,60 @@ fn playOne(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, reverb
 // context). This gets the input file's actual rate via ffprobe so the pitch
 // shift's math is correct regardless of what rate any given file happens to
 // be at, rather than assuming a fixed value.
-fn probeSampleRate(allocator: std.mem.Allocator, sound_path: []const u8) !u32 {
-    var child = std.process.Child.init(&.{
-        "ffprobe",            "-v",  "error",
-        "-select_streams",    "a:0", "-show_entries",
-        "stream=sample_rate", "-of", "csv=p=0",
-        sound_path,
-    }, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
+fn probeSampleRate(io: std.Io, sound_path: []const u8) !u32 {
+    var child = try std.process.spawn(io, .{
+        .argv = &.{
+            "ffprobe",            "-v",  "error",
+            "-select_streams",    "a:0", "-show_entries",
+            "stream=sample_rate", "-of", "csv=p=0",
+            sound_path,
+        },
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    });
 
-    try child.spawn();
     const stdout = child.stdout.?;
     var buf: [32]u8 = undefined;
-    const n = try stdout.readAll(&buf);
-    _ = child.wait() catch {};
+    var dest = [_][]u8{&buf};
+    const n = try stdout.readStreaming(io, &dest);
+    _ = child.wait(io) catch {};
 
     const trimmed = std.mem.trim(u8, buf[0..n], " \r\n\t");
     return std.fmt.parseInt(u32, trimmed, 10) catch 48000;
 }
 
-fn runAndTrackPid(allocator: std.mem.Allocator, argv: []const []const u8, pid_var: *std.atomic.Value(i32)) !void {
-    var child = std.process.Child.init(argv, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Inherit;
+fn runAndTrackPid(io: std.Io, argv: []const []const u8, pid_var: *std.atomic.Value(i32)) !void {
+    var child = try std.process.spawn(io, .{
+        .argv = argv,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .inherit,
+    });
 
-    try child.spawn();
-    pid_var.store(@intCast(child.id), .release);
+    const pid = child.id orelse return error.NoPid;
+    pid_var.store(@intCast(pid), .release);
     // If a stop command killed it, this just returns (possibly with a non-zero
     // exit status) instead of erroring - either way the caller still releases
     // the PTT key (or otherwise handles cleanup) regardless of why it stopped.
-    _ = child.wait() catch {};
+    _ = child.wait(io) catch {};
     pid_var.store(-1, .release);
 }
 
-pub fn runAndTrack(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    return runAndTrackPid(allocator, argv, &current_pid);
+pub fn runAndTrack(io: std.Io, argv: []const []const u8) !void {
+    return runAndTrackPid(io, argv, &current_pid);
 }
 
 // For yt-dlp downloads and TTS synthesis - these run on their own background
 // thread (not the player thread), so tracking their pid separately from
 // current_pid lets !stop kill an in-progress download/synthesis call even
 // while something else is independently playing, and vice versa.
-pub fn runAndTrackDownload(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    return runAndTrackPid(allocator, argv, &download_pid);
+pub fn runAndTrackDownload(io: std.Io, argv: []const []const u8) !void {
+    return runAndTrackPid(io, argv, &download_pid);
 }
 
 fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, reverb: bool, skip_effects: bool) !void {
-    const master = getMasterSettings();
+    const master = getMasterSettings(ctx.io);
     const compressor_active = master.compressor_enabled and !skip_effects;
 
     // Nothing active at all: same lightweight, format-specific fast paths as before.
@@ -362,12 +415,12 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
     // since that's genuine signal processing a sink-level gain knob can't do.
     if (effect == .none and !reverb and !compressor_active) {
         if (std.mem.endsWith(u8, sound_path, ".wav")) {
-            return runAndTrack(ctx.allocator, &.{ "paplay", "--device", ctx.sink, sound_path });
+            return runAndTrack(ctx.io, &.{ "paplay", "--device", ctx.sink, sound_path });
         }
         if (std.mem.endsWith(u8, sound_path, ".mp3")) {
-            return runAndTrack(ctx.allocator, &.{ "mpg123", "-q", "-o", "pulse", "-a", ctx.sink, sound_path });
+            return runAndTrack(ctx.io, &.{ "mpg123", "-q", "-o", "pulse", "-a", ctx.sink, sound_path });
         }
-        return runAndTrack(ctx.allocator, &.{ "ffmpeg", "-nostdin", "-loglevel", "error", "-i", sound_path, "-f", "pulse", ctx.sink });
+        return runAndTrack(ctx.io, &.{ "ffmpeg", "-nostdin", "-loglevel", "error", "-i", sound_path, "-f", "pulse", ctx.sink });
     }
 
     // At least one of {pitch/speed, reverb, compressor} is active -
@@ -382,7 +435,7 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
     defer {
         var i: usize = 0;
         while (i < temp_count) : (i += 1) {
-            std.fs.cwd().deleteFile(temp_paths[i]) catch {};
+            std.Io.Dir.cwd().deleteFile(ctx.io, temp_paths[i]) catch {};
             ctx.allocator.free(temp_paths[i]);
         }
     }
@@ -397,10 +450,10 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
         // file's actual rate is probed first rather than assumed.
         const factor: f64 = switch (effect) {
             .none => unreachable,
-            .slow => getEffectSettings().slow_factor,
-            .fast => getEffectSettings().fast_factor,
+            .slow => getEffectSettings(ctx.io).slow_factor,
+            .fast => getEffectSettings(ctx.io).fast_factor,
         };
-        const original_rate = probeSampleRate(ctx.allocator, current_path) catch 48000;
+        const original_rate = probeSampleRate(ctx.io, current_path) catch 48000;
         const new_rate: f64 = @as(f64, @floatFromInt(original_rate)) * factor;
 
         var filter_buf: [64]u8 = undefined;
@@ -410,8 +463,8 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
             .{ new_rate, original_rate },
         );
 
-        const tmp_path = try std.fmt.allocPrint(ctx.allocator, "/tmp/soundbot_pitch_{d}.wav", .{std.time.milliTimestamp()});
-        try runAndTrack(ctx.allocator, &.{
+        const tmp_path = try std.fmt.allocPrint(ctx.allocator, "/tmp/soundbot_pitch_{d}.wav", .{std.Io.Clock.real.now(ctx.io).nanoseconds});
+        try runAndTrack(ctx.io, &.{
             "ffmpeg", "-nostdin",   "-loglevel", "error",    "-y",
             "-i",     current_path, "-filter:a", filter_arg, tmp_path,
         });
@@ -424,12 +477,12 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
     if (reverb) {
         // sox's "reverberance" parameter is already a plain 0-100 percentage,
         // matching !reverbamount directly with no rescaling needed.
-        const amount = getEffectSettings().reverb_amount;
+        const amount = getEffectSettings(ctx.io).reverb_amount;
         var amount_buf: [8]u8 = undefined;
         const amount_arg = try std.fmt.bufPrint(&amount_buf, "{d}", .{amount});
 
-        const tmp_path = try std.fmt.allocPrint(ctx.allocator, "/tmp/soundbot_reverb_{d}.wav", .{std.time.milliTimestamp()});
-        try runAndTrack(ctx.allocator, &.{ "sox", current_path, tmp_path, "reverb", amount_arg });
+        const tmp_path = try std.fmt.allocPrint(ctx.allocator, "/tmp/soundbot_reverb_{d}.wav", .{std.Io.Clock.real.now(ctx.io).nanoseconds});
+        try runAndTrack(ctx.io, &.{ "sox", current_path, tmp_path, "reverb", amount_arg });
 
         temp_paths[temp_count] = tmp_path;
         temp_count += 1;
@@ -448,8 +501,8 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
             .{ threshold_linear, master.compressor_ratio, master.compressor_makeup },
         );
 
-        const tmp_path = try std.fmt.allocPrint(ctx.allocator, "/tmp/soundbot_master_{d}.wav", .{std.time.milliTimestamp()});
-        try runAndTrack(ctx.allocator, &.{
+        const tmp_path = try std.fmt.allocPrint(ctx.allocator, "/tmp/soundbot_master_{d}.wav", .{std.Io.Clock.real.now(ctx.io).nanoseconds});
+        try runAndTrack(ctx.io, &.{
             "ffmpeg", "-nostdin",   "-loglevel", "error",    "-y",
             "-i",     current_path, "-filter:a", filter_arg, tmp_path,
         });
@@ -459,17 +512,21 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
         current_path = tmp_path;
     }
 
-    try runAndTrack(ctx.allocator, &.{ "paplay", "--device", ctx.sink, current_path });
+    try runAndTrack(ctx.io, &.{ "paplay", "--device", ctx.sink, current_path });
 }
 
-pub fn triggerSound(allocator: std.mem.Allocator, sounds_dir: []const u8, name: []const u8) !bool {
-    if (try sounds.findSoundFile(allocator, sounds_dir, name)) |path| {
-        try enqueueSound(path, false, false);
+// io+rand added: io threads down into sounds.findSoundFile/findSoundFileFamily
+// (both now need it for directory access), rand into findSoundFileFamily (for
+// its random pick among numbered siblings) and into enqueueSound (for the
+// pitch/reverb roll).
+pub fn triggerSound(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, sounds_dir: []const u8, name: []const u8) !bool {
+    if (try sounds.findSoundFile(allocator, io, sounds_dir, name)) |path| {
+        try enqueueSound(allocator, io, rand, path, false, false);
         return true;
     }
 
-    if (try sounds.findSoundFileFamily(allocator, sounds_dir, name)) |path| {
-        try enqueueSound(path, false, false);
+    if (try sounds.findSoundFileFamily(allocator, io, rand, sounds_dir, name)) |path| {
+        try enqueueSound(allocator, io, rand, path, false, false);
         return true;
     }
 
@@ -477,9 +534,9 @@ pub fn triggerSound(allocator: std.mem.Allocator, sounds_dir: []const u8, name: 
     return false;
 }
 
-pub fn triggerRandomSound(allocator: std.mem.Allocator, sounds_dir: []const u8) !bool {
-    if (try sounds.pickRandomSoundFile(allocator, sounds_dir)) |path| {
-        try enqueueSound(path, false, false);
+pub fn triggerRandomSound(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, sounds_dir: []const u8) !bool {
+    if (try sounds.pickRandomSoundFile(allocator, io, rand, sounds_dir)) |path| {
+        try enqueueSound(allocator, io, rand, path, false, false);
         return true;
     }
     return false;

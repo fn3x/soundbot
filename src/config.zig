@@ -30,31 +30,31 @@ pub const Config = struct {
     }
 };
 
-fn getEnvOr(allocator: std.mem.Allocator, name: []const u8, default: []const u8) ![]const u8 {
-    return std.process.getEnvVarOwned(allocator, name) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => try allocator.dupe(u8, default),
-        else => return err,
-    };
+fn getEnvRaw(name: [*:0]const u8) ?[]const u8 {
+    const ptr = std.c.getenv(name) orelse return null;
+    return std.mem.span(ptr);
 }
 
-fn getEnvOptional(allocator: std.mem.Allocator, name: []const u8) !?[]const u8 {
-    const value = std.process.getEnvVarOwned(allocator, name) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return null,
-        else => return err,
-    };
-    if (value.len == 0) {
-        allocator.free(value);
-        return null;
+fn getEnvOr(allocator: std.mem.Allocator, name: [*:0]const u8, default: []const u8) ![]const u8 {
+    if (getEnvRaw(name)) |value| {
+        return try allocator.dupe(u8, value);
     }
-    return value;
+    return try allocator.dupe(u8, default);
 }
 
-fn getEnvRequired(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
-    return std.process.getEnvVarOwned(allocator, name) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => {
-            std.debug.print("Missing required env var: {s}\n", .{name});
-            return err;
-        },
-        else => return err,
-    };
+fn getEnvOptional(allocator: std.mem.Allocator, name: [*:0]const u8) !?[]const u8 {
+    const value = getEnvRaw(name) orelse return null;
+    // docker-compose's ${VAR:-} syntax sets an *empty* env var rather than
+    // leaving it truly absent when VAR isn't provided on the host - treat
+    // that the same as "not set" instead of as an explicit empty path.
+    if (value.len == 0) return null;
+    return try allocator.dupe(u8, value);
+}
+
+fn getEnvRequired(allocator: std.mem.Allocator, name: [*:0]const u8) ![]const u8 {
+    if (getEnvRaw(name)) |value| {
+        return try allocator.dupe(u8, value);
+    }
+    std.debug.print("Missing required env var: {s}\n", .{name});
+    return error.MissingEnvVar;
 }

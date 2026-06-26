@@ -47,57 +47,57 @@ pub fn findTtsVoice(name: []const u8) ?[]const u8 {
 }
 
 pub fn buildVoicesList(allocator: std.mem.Allocator) ![]u8 {
-    var out = std.ArrayList(u8).init(allocator);
-    errdefer out.deinit();
-    try out.appendSlice("Available voices:\n\n");
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "Available voices:\n\n");
     for (tts_voices) |v| {
-        try out.appendSlice("* !");
-        try out.appendSlice(v.cmd);
-        try out.appendSlice(" - ");
-        try out.appendSlice(v.voice_id);
-        try out.appendSlice(" (");
-        try out.appendSlice(v.language);
-        try out.appendSlice(")\n");
+        try out.appendSlice(allocator, "* !");
+        try out.appendSlice(allocator, v.cmd);
+        try out.appendSlice(allocator, " - ");
+        try out.appendSlice(allocator, v.voice_id);
+        try out.appendSlice(allocator, " (");
+        try out.appendSlice(allocator, v.language);
+        try out.appendSlice(allocator, ")\n");
     }
-    try out.appendSlice("* !tts - random voice\n");
-    return out.toOwnedSlice();
+    try out.appendSlice(allocator, "* !tts - random voice\n");
+    return out.toOwnedSlice(allocator);
 }
 
-fn synthesizeTts(allocator: std.mem.Allocator, voice_id: []const u8, engine: ?[]const u8, text: []const u8, out_path: []const u8) !void {
-    var argv = std.ArrayList([]const u8).init(allocator);
-    defer argv.deinit();
-    try argv.appendSlice(&.{
+fn synthesizeTts(allocator: std.mem.Allocator, io: std.Io, voice_id: []const u8, engine: ?[]const u8, text: []const u8, out_path: []const u8) !void {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.appendSlice(allocator, &.{
         "aws",          "polly", "synthesize-speech",
         "--output-format", "mp3",
         "--voice-id",   voice_id,
         "--text",       text,
     });
     if (engine) |e| {
-        try argv.appendSlice(&.{ "--engine", e });
+        try argv.appendSlice(allocator, &.{ "--engine", e });
     }
-    try argv.append(out_path);
-    try playback.runAndTrackDownload(allocator, argv.items);
+    try argv.append(allocator, out_path);
+    try playback.runAndTrackDownload(io, argv.items);
 }
  
-pub fn handleTtsCommand(allocator: std.mem.Allocator, voice_id: []const u8, engine: ?[]const u8, raw_text: []const u8) void {
+pub fn handleTtsCommand(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, voice_id: []const u8, engine: ?[]const u8, raw_text: []const u8) void {
     const text = if (raw_text.len > max_tts_chars) raw_text[0..max_tts_chars] else raw_text;
     if (text.len == 0) {
         std.debug.print("[soundbot] tts command needs some text after it, e.g. !ttsb hello there\n", .{});
         return;
     }
  
-    const out_path = std.fmt.allocPrint(allocator, "/tmp/soundbot_tts_{d}.mp3", .{std.time.milliTimestamp()}) catch |err| {
+    const out_path = std.fmt.allocPrint(allocator, "/tmp/soundbot_tts_{d}.mp3", .{std.Io.Clock.real.now(io).nanoseconds}) catch |err| {
         std.debug.print("[soundbot] tts failed to build temp path: {}\n", .{err});
         return;
     };
  
-    synthesizeTts(allocator, voice_id, engine, text, out_path) catch |err| {
+    synthesizeTts(allocator, io, voice_id, engine, text, out_path) catch |err| {
         std.debug.print("[soundbot] tts synthesis failed: {}\n", .{err});
         allocator.free(out_path);
         return;
     };
  
-    playback.enqueueSound(out_path, true, false) catch |err| {
+    _ = playback.enqueueSound(allocator, io, rand, out_path, true, false) catch |err| {
         std.debug.print("[soundbot] failed to queue tts output: {}\n", .{err});
         allocator.free(out_path);
     };
@@ -110,7 +110,7 @@ pub fn handleTtsCommand(allocator: std.mem.Allocator, voice_id: []const u8, engi
 // raw_text does, since the caller must dupe it before spawning this (the
 // original slice it was trimmed from is freed at the end of that loop
 // iteration, long before a slow API call would actually return).
-pub fn handleTtsCommandThread(allocator: std.mem.Allocator, voice_id: []const u8, engine: ?[]const u8, raw_text: []u8) void {
+pub fn handleTtsCommandThread(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, voice_id: []const u8, engine: ?[]const u8, raw_text: []u8) void {
     defer allocator.free(raw_text);
-    handleTtsCommand(allocator, voice_id, engine, raw_text);
+    handleTtsCommand(allocator, io, rand, voice_id, engine, raw_text);
 }

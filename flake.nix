@@ -11,17 +11,8 @@
     {
       devShells.x86_64-linux.default = pkgs.mkShell {
         packages = with pkgs; [
-          zig_0_13
+          zig_0_16
         ];
-
-        buildInputs = with pkgs; [
-          alsa-lib
-          libpulseaudio
-        ];
-
-        shellHook = ''
-          export LD_LIBRARY_PATH="${pkgs.alsa-lib}/lib:${pkgs.libpulseaudio}/lib:$LD_LIBRARY_PATH"
-        '';
       };
     };
 }
