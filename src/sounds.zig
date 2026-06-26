@@ -161,3 +161,27 @@ pub fn buildSoundsList(allocator: std.mem.Allocator, sounds_dir: []const u8) ![]
     }
     return out.toOwnedSlice();
 }
+
+pub fn pickRandomSoundFile(allocator: std.mem.Allocator, dir_path: []const u8) !?[]const u8 {
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| {
+        std.debug.print("Could not open sounds dir '{s}': {}\n", .{ dir_path, err });
+        return null;
+    };
+    defer dir.close();
+
+    var matches = std.ArrayList([]const u8).init(allocator);
+    defer {
+        for (matches.items) |m| allocator.free(m);
+        matches.deinit();
+    }
+
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind != .file) continue;
+        try matches.append(try std.fs.path.join(allocator, &.{ dir_path, entry.name }));
+    }
+
+    if (matches.items.len == 0) return null;
+    const idx = std.crypto.random.intRangeLessThan(usize, 0, matches.items.len);
+    return try allocator.dupe(u8, matches.items[idx]);
+}

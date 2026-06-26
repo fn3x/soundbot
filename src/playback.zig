@@ -53,8 +53,8 @@ const EffectSettings = struct {
     chance_percent: u32 = 10,
     slow_factor: f64 = 0.7,
     fast_factor: f64 = 1.3, // a starting guess - tune with !fast if 1.3 isn't what you want
-    reverb_chance_percent: u32 = 10,
-    reverb_amount: u32 = 50, // maps directly to sox's reverb "reverberance" 0-100
+    reverb_chance_percent: u32 = 30,
+    reverb_amount: u32 = 80, // maps directly to sox's reverb "reverberance" 0-100
 };
 
 var effect_mutex: std.Thread.Mutex = .{};
@@ -123,7 +123,7 @@ fn rollReverb() bool {
 // compressor squashing the dynamics of an entire song is a bigger, more
 // disruptive change than it is on a short clip.
 const MasterSettings = struct {
-    volume_percent: u32 = 100,
+    volume_percent: u32 = 80,
     compressor_enabled: bool = false,
     compressor_threshold_percent: u32 = 10, // -> linear 0.1 (~-20dB) when passed to acompressor
     compressor_ratio: f64 = 4,
@@ -143,17 +143,9 @@ pub fn resetMasterSettings(allocator: std.mem.Allocator, sink: []const u8) void 
     master_mutex.lock();
     master_settings = .{};
     master_mutex.unlock();
-    applySinkVolume(allocator, sink, 100);
+    applySinkVolume(allocator, sink, master_settings.volume_percent);
 }
 
-// Applies live via the sink's own volume (pactl set-sink-volume), not an
-// ffmpeg filter - this is what actually lets it affect a sound that's already
-// playing, since it adjusts the live PulseAudio connection itself rather than
-// baking a gain value into a file before playback even starts. Works cleanly
-// for this bot specifically because exactly one thing ever plays through
-// ts_bot_sink at a time (the player thread is strictly sequential) - there's
-// no ambiguity about "which stream" to adjust, unlike a general-purpose mixer
-// with multiple concurrent streams.
 pub fn setVolume(allocator: std.mem.Allocator, percent: u32, sink: []const u8) void {
     master_mutex.lock();
     master_settings.volume_percent = percent;
@@ -482,5 +474,13 @@ pub fn triggerSound(allocator: std.mem.Allocator, sounds_dir: []const u8, name: 
     }
 
     std.debug.print("[soundbot] no sound file found for !{s}\n", .{name});
+    return false;
+}
+
+pub fn triggerRandomSound(allocator: std.mem.Allocator, sounds_dir: []const u8) !bool {
+    if (try sounds.pickRandomSoundFile(allocator, sounds_dir)) |path| {
+        try enqueueSound(path, false, false);
+        return true;
+    }
     return false;
 }

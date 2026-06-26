@@ -13,6 +13,8 @@ const help_text =
     \\Commands:
     \\
     \\* !<name> - play a sound (see !sounds for the list)
+    \\* !r - play a random sound (see !sounds for the list)
+    \\* !random - same as !r
     \\* !sequence <name1> <name2> - play a sequence of sounds (see !sounds for the list)
     \\* !skip - skip current sound or cancel an in-progress download; queue keeps playing
     \\* !stop - clear the queue, stop current playback
@@ -22,7 +24,6 @@ const help_text =
     \\* !tts <text> - text-to-speech, random voice
     \\* !yt <url or search> - play audio from YouTube (or anywhere yt-dlp supports)
     \\* !ytlength <seconds> - cap yt clip length (0 = no cap)
-    \\* !join [channel_id] - move the bot here (or to a specific channel)
     \\* !chance <0-100> - % chance a sound gets pitch+speed shifted
     \\* !slow / !fast <0.5-2.0> - how much, when it does
     \\* !chancereverb <0-100> - % chance a sound gets reverb (independent of !chance)
@@ -168,12 +169,10 @@ pub fn main() !void {
     // 3. Move into the configured channel.
     try query.doCommand(allocator, stdin, reader, "clientmove (startup)", "clientmove clid={s} cid={s}", .{ clid, cfg.channel_id });
 
-    // 4. Register for chat notifications: per-channel (for normal triggers) and
-    //    server-wide (so a bare "!join" typed from any channel's chat - or the
-    //    server chat tab - can still reach us, since textchannel notifications
-    //    are scoped to wherever we're currently sitting).
+    // 4. Register for chat notifications: per-channel
     try query.doCommand(allocator, stdin, reader, "servernotifyregister textchannel", "servernotifyregister event=textchannel", .{});
-    try query.doCommand(allocator, stdin, reader, "servernotifyregister textserver", "servernotifyregister event=textserver", .{});
+
+    playback.resetMasterSettings(allocator, cfg.sink);
 
     std.debug.print("[soundbot] ready - watching channel {s} for commands\n", .{cfg.channel_id});
 
@@ -556,86 +555,11 @@ pub fn main() !void {
             continue;
         }
 
-        if (std.mem.eql(u8, name, "join")) {
-            const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
-
-            const target_cid: []u8 = blk: {
-                if (rest.len == 0) {
-                    const mode = ts_protocol.extractField(trimmed, "targetmode=") orelse "0";
-
-                    if (std.mem.eql(u8, mode, "2")) {
-                        // Channel chat - target= is the channel id directly.
-                        const raw = ts_protocol.extractField(trimmed, "target=") orelse {
-                            std.debug.print("[soundbot] !join: couldn't determine your channel; try !join <channel_id>\n", .{});
-                            continue;
-                        };
-                        break :blk try allocator.dupe(u8, raw);
-                    }
-
-                    // Anything else (server-wide chat, most likely) - server chat doesn't
-                    // carry a channel id, so look up the sender's current channel instead.
-                    const invoker_clid = ts_protocol.extractField(trimmed, "invokerid=") orelse {
-                        std.debug.print("[soundbot] !join: couldn't determine who sent this; try !join <channel_id>\n", .{});
-                        continue;
-                    };
-                    try query.sendCommand(stdin, "clientlist", .{});
-                    var found_cid: ?[]u8 = null;
-                    {
-                        var lookup_lines = try query.readUntilError(allocator, reader);
-                        defer query.freeLines(allocator, &lookup_lines);
-                        found_cid = try query.findChannelIdByClid(allocator, lookup_lines.items, invoker_clid);
-                    }
-                    break :blk found_cid orelse {
-                        std.debug.print("[soundbot] !join: couldn't find your channel automatically; try !join <channel_id>\n", .{});
-                        continue;
-                    };
-                }
-
-                var rest_is_digits = true;
-                for (rest) |c| {
-                    if (!std.ascii.isDigit(c)) {
-                        rest_is_digits = false;
-                        break;
-                    }
-                }
-                if (!rest_is_digits) {
-                    std.debug.print("[soundbot] !join channel id must be numeric, got '{s}'\n", .{rest});
-                    continue;
-                }
-                break :blk try allocator.dupe(u8, rest);
+        if (std.mem.eql(u8, name, "r") or std.mem.eql(u8, name, "random")) {
+            _ = playback.triggerRandomSound(allocator, cfg.sounds_dir) catch |err| {
+                std.debug.print("[soundbot] Couldn't play a random sound: {}\n", .{ err });
             };
-            defer allocator.free(target_cid);
 
-            // 1. Find the voice client (the actual TS6 GUI client transmitting audio) by nickname.
-            try query.sendCommand(stdin, "clientlist", .{});
-            var voice_clid: ?[]u8 = null;
-            {
-                var lines = try query.readUntilError(allocator, reader);
-                defer query.freeLines(allocator, &lines);
-                voice_clid = try query.findClientIdByNickname(allocator, lines.items, cfg.voice_nickname);
-            }
-            const v_clid = voice_clid orelse {
-                std.debug.print("[soundbot] no connected client named '{s}' - is the voice client online?\n", .{cfg.voice_nickname});
-                continue;
-            };
-            defer allocator.free(v_clid);
-
-            // 2. Drop the old chat subscription before moving, so it doesn't straddle channels
-            //    (servernotifyregister's textchannel scope follows wherever this session sits).
-            try query.doCommand(allocator, stdin, reader, "servernotifyunregister", "servernotifyunregister", .{});
-
-            // 3. Move our own ServerQuery session into the new channel.
-            try query.doCommand(allocator, stdin, reader, "clientmove (listener)", "clientmove clid={s} cid={s}", .{ clid, target_cid });
-
-            // 4. Re-subscribe - this picks up whatever channel we're now sitting in,
-            //    plus server-wide chat again for future cross-channel !join calls.
-            try query.doCommand(allocator, stdin, reader, "servernotifyregister textchannel", "servernotifyregister event=textchannel", .{});
-            try query.doCommand(allocator, stdin, reader, "servernotifyregister textserver", "servernotifyregister event=textserver", .{});
-
-            // 5. Move the actual voice client too, so speaking follows listening.
-            try query.doCommand(allocator, stdin, reader, "clientmove (voice)", "clientmove clid={s} cid={s}", .{ v_clid, target_cid });
-
-            std.debug.print("[soundbot] moved to channel {s}\n", .{target_cid});
             continue;
         }
 
