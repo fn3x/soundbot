@@ -45,6 +45,14 @@ var current_pid = std.atomic.Value(i32).init(-1);
 // the two stepping on each other's tracking.
 var download_pid = std.atomic.Value(i32).init(-1);
 
+// Tracks whether the item *currently playing* (set by playOne, right before
+// playback) is yt-sourced. Read by setVolume/setYtVolume - called from the
+// main chat-dispatch thread, not the player thread - to decide whether a
+// volume change should touch the live sink right now: !volume should only
+// live-adjust non-yt audio, !ytvolume only yt audio, even though both still
+// always save their respective setting regardless of what's playing.
+var current_is_yt = std.atomic.Value(bool).init(false);
+
 // Runtime-tunable via !chance / !slow / !fast / !chancereverb / !reverbamount -
 // not persisted across restarts. slow_factor/fast_factor affect pitch AND speed
 // together (like a record played at the wrong speed) - 0.7 = deeper voice +
@@ -141,17 +149,11 @@ fn rollReverb(io: std.Io, rand: std.Random) bool {
     return roll < settings.reverb_chance_percent;
 }
 
-// Always-applied master controls (!volume / !compressor). Volume is never
-// exempted for any source (it's sink-level, applying to literally everything
-// flowing through ts_bot_sink, including yt-dlp audio - see setVolume). The
-// compressor *is* exempted for yt-dlp audio though, via skip_effects in
-// playFile, for the same reasoning as the random pitch/reverb effects: a
-// compressor squashing the dynamics of an entire song is a bigger, more
-// disruptive change than it is on a short clip.
 const MasterSettings = struct {
-    volume_percent: u32 = 100,
-    compressor_enabled: bool = false,
-    compressor_threshold_percent: u32 = 10, // -> linear 0.1 (~-20dB) when passed to acompressor
+    volume_percent: u32 = 80,
+    ytvolume_percent: u32 = 50,
+    compressor_enabled: bool = true,
+    compressor_threshold_percent: u32 = 5,
     compressor_ratio: f64 = 4,
     compressor_makeup: f64 = 1,
 };
@@ -159,7 +161,6 @@ const MasterSettings = struct {
 var master_mutex: std.Io.Mutex = .init;
 var master_settings: MasterSettings = .{};
 
-// pub for !status - same reasoning as getEffectSettings above.
 pub fn getMasterSettings(io: std.Io) MasterSettings {
     master_mutex.lock(io) catch |err| {
         std.debug.print("[soundbot] Error locking master settings mutex on getting master settings {}", .{err});
@@ -176,9 +177,17 @@ pub fn resetMasterSettings(io: std.Io, sink: []const u8) void {
     };
     master_settings = .{};
     master_mutex.unlock(io);
-    applySinkVolume(io, sink, master_settings.volume_percent);
+    if (current_is_yt.load(.acquire)) {
+        applySinkVolume(io, sink, master_settings.ytvolume_percent);
+    } else {
+        applySinkVolume(io, sink, master_settings.volume_percent);
+    }
 }
 
+// Always saves the setting regardless of what's playing, but only touches the
+// live sink if a non-yt item is currently playing - while a yt track is
+// playing, !volume saves for later without affecting what's audible right
+// now (only !ytvolume can do that - see setYtVolume below).
 pub fn setVolume(io: std.Io, percent: u32, sink: []const u8) void {
     master_mutex.lock(io) catch |err| {
         std.debug.print("[soundbot] Error setting master settings volume mutex {}", .{err});
@@ -186,7 +195,24 @@ pub fn setVolume(io: std.Io, percent: u32, sink: []const u8) void {
     };
     master_settings.volume_percent = percent;
     master_mutex.unlock(io);
-    applySinkVolume(io, sink, percent);
+    if (!current_is_yt.load(.acquire)) {
+        applySinkVolume(io, sink, percent);
+    }
+}
+
+// Mirror of setVolume for yt-sourced audio specifically - only touches the
+// live sink while a yt item is currently playing, otherwise just saves the
+// setting for the next time !yt plays something.
+pub fn setYtVolume(io: std.Io, percent: u32, sink: []const u8) void {
+    master_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] Error setting master settings yt volume mutex {}", .{err});
+        return;
+    };
+    master_settings.ytvolume_percent = percent;
+    master_mutex.unlock(io);
+    if (current_is_yt.load(.acquire)) {
+        applySinkVolume(io, sink, percent);
+    }
 }
 
 fn applySinkVolume(io: std.Io, sink: []const u8, percent: u32) void {
@@ -329,6 +355,13 @@ fn playOne(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, reverb
     };
     const reverb_label: []const u8 = if (reverb) " (reverb)" else "";
     std.debug.print("[soundbot] playing {s}{s}{s}\n", .{ sound_path, effect_label, reverb_label });
+
+    // skip_effects is currently only ever true for !yt audio - reused here as
+    // the "is this yt audio" signal rather than adding a redundant parallel
+    // flag, since it's already exactly that signal everywhere else in this file.
+    current_is_yt.store(skip_effects, .release);
+    const master = getMasterSettings(ctx.io);
+    applySinkVolume(ctx.io, ctx.sink, if (skip_effects) master.ytvolume_percent else master.volume_percent);
 
     runCmd(ctx.io, &.{ "xdotool", "keydown", ctx.ptt_key }) catch |err| {
         std.debug.print("[soundbot] keydown failed: {}\n", .{err});

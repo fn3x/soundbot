@@ -123,12 +123,10 @@ docker compose -f docker-compose.yml -f docker-compose.soundbot.yml up -d
   reverby, or reverby on its own
 - `!reverbamount <0-100>` — how much reverb, when it does (50 by default; maps
   directly to sox's "reverberance" parameter)
-- `!volume <0-100>` — overall volume (100 by default). Unlike `!chance`/`!chancereverb`,
-  this isn't randomly rolled and isn't exempted for `!yt` audio - it's a
-  deliberate, persistent setting that applies to absolutely everything
-- `!compressor on`/`!compressor off` — evens out loud/quiet sounds (off by
-  default). `!compressor <threshold 1-100> <ratio 1-20> <makeup 1-64>` tunes
-  and enables it in one step, e.g. `!compressor 10 4 1` (the defaults).
+- `!volume <0-100>` — overall volume (80 by default). except YouTube - see !ytvolume
+- `!compressor on`/`!compressor off` — evens out loud/quiet sounds (on by default)
+- `!compressor <threshold 1-100> <ratio 1-20> <makeup 1-64>` tunes
+  and enables it in one step, e.g. `!compressor 5 4 1` (the defaults).
   Threshold is on the same 0-100 scale as everything else in this bot,
   converted internally to ffmpeg's actual linear 0-1 range rather than
   exposing that directly. Attack (20ms) and release (250ms) stay fixed -
@@ -144,10 +142,11 @@ docker compose -f docker-compose.yml -f docker-compose.soundbot.yml up -d
   silently truncated, not rejected. Real AWS cost per character past the free
   tier - worth keeping an eye on usage if this gets used a lot. The IAM user
   behind the access key needs `polly:SynthesizeSpeech` permission at minimum.
+- `!ytvolume <0-100>` — YouTube playback volume (50 by default)
 - `!yt <url or search query>` — downloads audio via yt-dlp and queues it like
   any other sound. A bare URL is used as-is; anything else is treated as a
-  YouTube search, taking the top result. Plays the **full track by default** -
-  `!ytlength <seconds>` sets a cap if you want one for a specific use case
+  YouTube search, taking the top result. Plays the **full track by default**
+- `!ytlength <seconds>` sets a cap if you want one for a specific use case
   (e.g. `!ytlength 30` for clips), `!ytlength 0` removes it again. A cap also
   limits download time and how long the bot occupies the queue/PTT on one
   clip - worth setting one if the channel gets used for long videos/streams

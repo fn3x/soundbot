@@ -22,8 +22,10 @@ const help_text =
     \\* !voices - list available TTS voices
     \\* !ttsg/!ttsb/!ttsjo/!ttsma/!ttssa/!ttsam/!ttsem/!ttsju/!ttsni/!ttsca/!ttsm/!ttst <text> - text-to-speech (see !voices)
     \\* !tts <text> - text-to-speech, random voice
+    \\* !volume <0-100> — overall volume (80 by default). YouTube volume is set with !ytvolume
     \\* !yt <url or search> - play audio from YouTube (or anywhere yt-dlp supports)
     \\* !ytlength <seconds> - cap yt clip length (0 = no cap)
+    \\* !ytvolume <0-100> - volume for YoutTube audio specifically (50 by default)
     \\* !chance <0-100> - % chance a sound gets pitch+speed shifted
     \\* !slow / !fast <0.5-2.0> - how much, when it does
     \\* !chancereverb <0-100> - % chance a sound gets reverb (independent of !chance)
@@ -68,6 +70,7 @@ fn buildStatusText(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     try out.appendSlice(allocator, std.fmt.bufPrint(&buf, "* !chance: {d}% (!slow={d:.2}x, !fast={d:.2}x)\n", .{ eff.chance_percent, eff.slow_factor, eff.fast_factor }) catch "* !chance: (error formatting)\n");
     try out.appendSlice(allocator, std.fmt.bufPrint(&buf, "* !chancereverb: {d}% (!reverbamount={d})\n", .{ eff.reverb_chance_percent, eff.reverb_amount }) catch "* !chancereverb: (error formatting)\n");
     try out.appendSlice(allocator, std.fmt.bufPrint(&buf, "* !volume: {d}%\n", .{mas.volume_percent}) catch "* !volume: (error formatting)\n");
+    try out.appendSlice(allocator, std.fmt.bufPrint(&buf, "* !ytvolume: {d}%\n", .{mas.ytvolume_percent}) catch "* !ytvolume: (error formatting)\n");
     if (mas.compressor_enabled) {
         try out.appendSlice(allocator, std.fmt.bufPrint(
             &buf,
@@ -454,8 +457,27 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             }
             playback.setVolume(io, percent, cfg.sink);
-            var buf: [96]u8 = undefined;
-            const ok_msg = std.fmt.bufPrint(&buf, "Volume set to {d}% - takes effect immediately, even on whatever's currently playing", .{percent}) catch "Volume updated";
+            var buf: [128]u8 = undefined;
+            const ok_msg = std.fmt.bufPrint(&buf, "Volume set to {d}%", .{percent}) catch "Volume updated";
+            query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, ok_msg);
+            continue;
+        }
+
+        if (std.mem.eql(u8, name, "ytvolume")) {
+            const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
+            const percent = std.fmt.parseInt(u32, rest, 10) catch {
+                query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "!ytvolume needs a whole number 0-100, e.g. !ytvolume 80");
+                continue;
+            };
+            if (percent > 100) {
+                var buf: [64]u8 = undefined;
+                const err_msg = std.fmt.bufPrint(&buf, "!ytvolume must be 0-100, got {d}", .{percent}) catch "!ytvolume must be 0-100";
+                query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, err_msg);
+                continue;
+            }
+            playback.setYtVolume(io, percent, cfg.sink);
+            var buf: [128]u8 = undefined;
+            const ok_msg = std.fmt.bufPrint(&buf, "YouTube volume set to {d}%", .{percent}) catch "Yt volume updated";
             query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, ok_msg);
             continue;
         }
