@@ -13,6 +13,7 @@ const help_text =
     \\Commands:
     \\
     \\* !<name> - play a sound (see !sounds for the list)
+    \\* !sequence <name1> <name2> - play a sequence of sounds (see !sounds for the list)
     \\* !skip - skip current sound or cancel an in-progress download; queue keeps playing
     \\* !stop - clear the queue, stop current playback
     \\* !sounds - list available sound triggers
@@ -531,6 +532,26 @@ pub fn main() !void {
                 .{ threshold_percent, ratio, makeup },
             ) catch "Compressor settings updated and enabled";
             query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, ok_msg);
+            continue;
+        }
+
+        if (std.mem.eql(u8, name, "sequence")) {
+            const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
+            var parts = std.mem.splitScalar(u8, rest, ' ');
+
+            while (parts.next()) |sound| {
+                if (sound.len == 0) {
+                    continue;
+                }
+
+                playback.triggerSound(allocator, cfg.sounds_dir, sound) catch |err| {
+                    var buf: [128]u8 = undefined;
+                    const ok_msg = std.fmt.bufPrint(&buf, "Couldn't play {s}: {}", .{ sound, err }) catch "Sequence trigger failed";
+                    query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, ok_msg);
+                    std.debug.print("[soundbot] sequence trigger failed for {s}: {}\n", .{ sound, err });
+                };
+            }
+
             continue;
         }
 
