@@ -1,19 +1,17 @@
 const std = @import("std");
 
-// ---- Find <name>.* on disk regardless of extension, e.g. "test_sound" -> test_sound.mp3 ----
-
-pub fn findSoundFile(allocator: std.mem.Allocator, dir_path: []const u8, name: []const u8) !?[]const u8 {
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| {
+pub fn findSoundFile(allocator: std.mem.Allocator, io: std.Io, dir_path: []const u8, name: []const u8) !?[]const u8 {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch |err| {
         std.debug.print("Could not open sounds dir '{s}': {}\n", .{ dir_path, err });
         return null;
     };
-    defer dir.close();
+    defer dir.close(io);
 
     const prefix = try std.fmt.allocPrint(allocator, "{s}.", .{name});
     defer allocator.free(prefix);
 
     var it = dir.iterate();
-    while (try it.next()) |entry| {
+    while (try it.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (std.mem.startsWith(u8, entry.name, prefix)) {
             return try std.fs.path.join(allocator, &.{ dir_path, entry.name });
@@ -22,26 +20,21 @@ pub fn findSoundFile(allocator: std.mem.Allocator, dir_path: []const u8, name: [
     return null;
 }
 
-// Fallback for when findSoundFile finds no exact match: looks for "<name><digits>.<ext>"
-// (du1.mp3, du2.mp3, ...) and picks one at random. Only reached when the exact name
-// didn't match anything, so "!du1" - which DOES match du1.mp3 exactly above - never
-// falls through to here; "!du" with no du.* file does, and lands on one of its
-// numbered siblings.
-pub fn findSoundFileFamily(allocator: std.mem.Allocator, dir_path: []const u8, name: []const u8) !?[]const u8 {
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| {
+pub fn findSoundFileFamily(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, dir_path: []const u8, name: []const u8) !?[]const u8 {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch |err| {
         std.debug.print("Could not open sounds dir '{s}': {}\n", .{ dir_path, err });
         return null;
     };
-    defer dir.close();
+    defer dir.close(io);
 
-    var matches = std.ArrayList([]const u8).init(allocator);
+    var matches: std.ArrayList([]const u8) = .empty;
     defer {
         for (matches.items) |m| allocator.free(m);
-        matches.deinit();
+        matches.deinit(allocator);
     }
 
     var it = dir.iterate();
-    while (try it.next()) |entry| {
+    while (try it.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.startsWith(u8, entry.name, name)) continue;
 
@@ -59,11 +52,11 @@ pub fn findSoundFileFamily(allocator: std.mem.Allocator, dir_path: []const u8, n
         }
         if (!all_digits) continue;
 
-        try matches.append(try std.fs.path.join(allocator, &.{ dir_path, entry.name }));
+        try matches.append(allocator, try std.fs.path.join(allocator, &.{ dir_path, entry.name }));
     }
 
     if (matches.items.len == 0) return null;
-    const idx = std.crypto.random.intRangeLessThan(usize, 0, matches.items.len);
+    const idx = rand.intRangeLessThan(usize, 0, matches.items.len);
     return try allocator.dupe(u8, matches.items[idx]);
 }
 
@@ -81,31 +74,25 @@ fn trailingNumber(s: []const u8) u64 {
     return std.fmt.parseInt(u64, s[i..], 10) catch 0;
 }
 
-// Builds the !sounds reply text, grouping numbered siblings under their shared
-// family trigger:
-//   Available sounds:
-//
-//   * !du (!du1 !du2)
-//   * !fah
-pub fn buildSoundsList(allocator: std.mem.Allocator, sounds_dir: []const u8) ![]u8 {
-    var dir = try std.fs.cwd().openDir(sounds_dir, .{ .iterate = true });
-    defer dir.close();
+pub fn buildSoundsList(allocator: std.mem.Allocator, io: std.Io, sounds_dir: []const u8) ![]u8 {
+    var dir = try std.Io.Dir.cwd().openDir(io, sounds_dir, .{ .iterate = true });
+    defer dir.close(io);
 
     // group key (family prefix, or the bare name for files with no numeric
     // suffix) -> list of individual member names (empty for non-family files).
-    var groups = std.StringHashMap(std.ArrayList([]u8)).init(allocator);
+    var groups: std.StringHashMap(std.ArrayList([]u8)) = .init(allocator);
     defer {
         var it = groups.iterator();
         while (it.next()) |entry| {
             for (entry.value_ptr.items) |m| allocator.free(m);
-            entry.value_ptr.deinit();
+            entry.value_ptr.deinit(allocator);
             allocator.free(entry.key_ptr.*);
         }
         groups.deinit();
     }
 
     var it = dir.iterate();
-    while (try it.next()) |entry| {
+    while (try it.next(io)) |entry| {
         if (entry.kind != .file) continue;
         const dot = std.mem.indexOfScalar(u8, entry.name, '.') orelse continue;
         const base = entry.name[0..dot];
@@ -120,7 +107,7 @@ pub fn buildSoundsList(allocator: std.mem.Allocator, sounds_dir: []const u8) ![]
         const gop = try groups.getOrPut(key);
         if (!gop.found_existing) {
             gop.key_ptr.* = try allocator.dupe(u8, key);
-            gop.value_ptr.* = std.ArrayList([]u8).init(allocator);
+            gop.value_ptr.* = .empty;
         }
 
         if (has_family) {
@@ -131,63 +118,63 @@ pub fn buildSoundsList(allocator: std.mem.Allocator, sounds_dir: []const u8) ![]
                     break;
                 }
             }
-            if (!already) try gop.value_ptr.append(try allocator.dupe(u8, base));
+            if (!already) try gop.value_ptr.append(allocator, try allocator.dupe(u8, base));
         }
     }
 
-    var keys = std.ArrayList([]const u8).init(allocator);
-    defer keys.deinit();
+    var keys: std.ArrayList([]const u8) = .empty;
+    defer keys.deinit(allocator);
     var kit = groups.keyIterator();
-    while (kit.next()) |k| try keys.append(k.*);
+    while (kit.next()) |k| try keys.append(allocator, k.*);
     std.mem.sort([]const u8, keys.items, {}, lessThanStr);
 
-    var out = std.ArrayList(u8).init(allocator);
-    errdefer out.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
     if (keys.items.len == 0) {
-        try out.appendSlice("No sounds available.");
+        try out.appendSlice(allocator, "No sounds available.");
     } else {
-        try out.appendSlice("Available sounds:\n\n");
+        try out.appendSlice(allocator, "Available sounds:\n\n");
         for (keys.items) |key| {
-            try out.appendSlice("* !");
-            try out.appendSlice(key);
+            try out.appendSlice(allocator, "* !");
+            try out.appendSlice(allocator, key);
 
             const members = groups.getPtr(key).?.items;
             std.mem.sort([]u8, members, {}, lessThanByTrailingNumber);
             if (members.len > 0) {
-                try out.appendSlice(" (");
+                try out.appendSlice(allocator, " (");
                 for (members, 0..) |m, i| {
-                    if (i > 0) try out.append(' ');
-                    try out.append('!');
-                    try out.appendSlice(m);
+                    if (i > 0) try out.append(allocator, ' ');
+                    try out.append(allocator, '!');
+                    try out.appendSlice(allocator, m);
                 }
-                try out.appendSlice(")");
+                try out.appendSlice(allocator, ")");
             }
-            try out.append('\n');
+            try out.append(allocator, '\n');
         }
     }
-    return out.toOwnedSlice();
+    return out.toOwnedSlice(allocator);
 }
 
-pub fn pickRandomSoundFile(allocator: std.mem.Allocator, dir_path: []const u8) !?[]const u8 {
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| {
+pub fn pickRandomSoundFile(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, dir_path: []const u8) !?[]const u8 {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch |err| {
         std.debug.print("Could not open sounds dir '{s}': {}\n", .{ dir_path, err });
         return null;
     };
-    defer dir.close();
+    defer dir.close(io);
 
-    var matches = std.ArrayList([]const u8).init(allocator);
+    var matches: std.ArrayList([]const u8) = .empty;
     defer {
         for (matches.items) |m| allocator.free(m);
-        matches.deinit();
+        matches.deinit(allocator);
     }
 
     var it = dir.iterate();
-    while (try it.next()) |entry| {
+    while (try it.next(io)) |entry| {
         if (entry.kind != .file) continue;
-        try matches.append(try std.fs.path.join(allocator, &.{ dir_path, entry.name }));
+        try matches.append(allocator, try std.fs.path.join(allocator, &.{ dir_path, entry.name }));
     }
 
     if (matches.items.len == 0) return null;
-    const idx = std.crypto.random.intRangeLessThan(usize, 0, matches.items.len);
+    const idx = rand.intRangeLessThan(usize, 0, matches.items.len);
     return try allocator.dupe(u8, matches.items[idx]);
 }
