@@ -540,16 +540,17 @@ pub fn main() !void {
             var parts = std.mem.splitScalar(u8, rest, ' ');
 
             while (parts.next()) |sound| {
-                if (sound.len == 0) {
-                    continue;
-                }
+                if (sound.len == 0 or sound.len >= 100) continue;
 
-                playback.triggerSound(allocator, cfg.sounds_dir, sound) catch |err| {
-                    var buf: [128]u8 = undefined;
-                    const ok_msg = std.fmt.bufPrint(&buf, "Couldn't play {s}: {}", .{ sound, err }) catch "Sequence trigger failed";
-                    query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, ok_msg);
-                    std.debug.print("[soundbot] sequence trigger failed for {s}: {}\n", .{ sound, err });
+                const found = playback.triggerSound(allocator, cfg.sounds_dir, sound) catch |err| {
+                    std.debug.print("[soundbot] Couldn't play {s}: {}\n", .{ sound, err });
+                    continue;
                 };
+                if (!found) {
+                    var buf: [128]u8 = undefined;
+                    const err_msg = std.fmt.bufPrint(&buf, "Sound not found: {s}", .{sound}) catch "Sound not found";
+                    query.replyToTrigger(allocator, stdin, reader, trimmed, cfg.channel_id, err_msg);
+                }
             }
 
             continue;
@@ -638,7 +639,7 @@ pub fn main() !void {
             continue;
         }
 
-        playback.triggerSound(allocator, cfg.sounds_dir, name) catch |err| {
+        _ = playback.triggerSound(allocator, cfg.sounds_dir, name) catch |err| {
             std.debug.print("[soundbot] trigger failed: {}\n", .{err});
         };
     }

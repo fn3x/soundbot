@@ -470,16 +470,17 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
     try runAndTrack(ctx.allocator, &.{ "paplay", "--device", ctx.sink, current_path });
 }
 
-pub fn triggerSound(allocator: std.mem.Allocator, sounds_dir: []const u8, name: []const u8) !void {
+pub fn triggerSound(allocator: std.mem.Allocator, sounds_dir: []const u8, name: []const u8) !bool {
     if (try sounds.findSoundFile(allocator, sounds_dir, name)) |path| {
         try enqueueSound(path, false, false);
-        return;
+        return true;
     }
 
     if (try sounds.findSoundFileFamily(allocator, sounds_dir, name)) |path| {
         try enqueueSound(path, false, false);
-        return;
+        return true;
     }
 
     std.debug.print("[soundbot] no sound file found for !{s}\n", .{name});
+    return false;
 }
