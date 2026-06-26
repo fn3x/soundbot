@@ -66,8 +66,7 @@ fn looksLikeUrl(s: []const u8) bool {
 fn copyToWritableTemp(allocator: std.mem.Allocator, io: std.Io, source_path: []const u8) ![]const u8 {
     const tmp_path = try std.fmt.allocPrint(allocator, "/tmp/soundbot_yt_cookies_{d}.txt", .{std.Io.Clock.real.now(io).nanoseconds});
     errdefer allocator.free(tmp_path);
-    const tmp_dir = try std.Io.Dir.cwd().openDir(io, tmp_path, .{});
-    try std.Io.Dir.cwd().copyFile(source_path, tmp_dir, tmp_path, io, .{});
+    try std.Io.Dir.cwd().copyFile(source_path, std.Io.Dir.cwd(), tmp_path, io, .{});
     return tmp_path;
 }
 
