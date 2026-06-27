@@ -1,7 +1,5 @@
 const std = @import("std");
 
-// ---- TS3/TS6 ServerQuery string unescaping (\s -> space, \p -> |, etc.) ----
-
 pub fn unescapeTs(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -29,8 +27,6 @@ pub fn unescapeTs(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-// ---- Reverse direction - needed now that the bot replies in chat itself ----
-
 pub fn escapeTs(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -48,8 +44,6 @@ pub fn escapeTs(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     }
     return out.toOwnedSlice(allocator);
 }
-
-// ---- Pull a "key=value" token's value out of a space-delimited ServerQuery line ----
 
 pub fn extractField(line: []const u8, key: []const u8) ?[]const u8 {
     var it = std.mem.splitScalar(u8, line, ' ');

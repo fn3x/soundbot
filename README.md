@@ -116,8 +116,6 @@ docker compose -f docker-compose.yml -f docker-compose.soundbot.yml up -d
 - `!sounds` — replies in chat listing every available trigger name
 - `!stop` — clears the queue, stops whatever's currently playing
 - `!skip` - skip current sound or cancel an in-progress download; queue keeps playing
-- `!join` — moves the bot to your current channel (works from a channel's chat or the "Server" chat tab)
-- `!join <channel_id>` — moves it to a specific channel regardless of where typed
 - `!chance <0-100>` — % chance a played sound gets pitch+speed shifted
 - `!slow <0.5-2.0>` / `!fast <0.5-2.0>` — how much, when it does (0.7/1.3 by default)
 - `!chancereverb <0-100>` — % chance a played sound gets reverb, completely
@@ -206,8 +204,6 @@ docker logs -f soundbot
 
 - Ctrl+C/container-stop sends a clean `quit` to the ServerQuery session, but
   doesn't kill an in-flight `ffmpeg`/release the PTT key first.
-- A failed step inside `!join`'s multi-command sequence aborts the whole bot
-  rather than failing just that command.
 - `!sounds`/`!voices` reply in chat, but most other commands (`!tts`, `!yt`,
   `!chance`, etc.) only log to `docker logs` - no chat confirmation that they
   actually worked.

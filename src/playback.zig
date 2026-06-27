@@ -18,20 +18,14 @@ const QueueItem = struct {
     name: []const u8,
     sound_path: []const u8,
     effect: Effect,
-    reverb: bool, // independent of effect - can combine with none/slow/fast alike
-    skip_effects: bool, // true for !yt - also suppresses the compressor at play time, not just the random pitch/reverb roll at enqueue time
-    delete_after: bool, // true for dynamically-generated files (TTS output) that should be cleaned up after playing
+    reverb: bool,
+    skip_effects: bool,
+    delete_after: bool,
 };
 
 var queue_mutex: std.Io.Mutex = .init;
 var queue_cond: std.Io.Condition = .init;
-var sound_queue: std.ArrayList(QueueItem) = undefined; // initialized via initQueue()
-
-// QueueItem is private to this module, so main() can't construct
-// std.ArrayList(QueueItem) directly - this is the public init entry point instead.
-pub fn initQueue() void {
-    sound_queue = .empty;
-}
+var sound_queue: std.ArrayList(QueueItem) = .empty;
 
 var current_item_name: ?[]u8 = null;
 
@@ -67,7 +61,7 @@ pub fn getCurrentName(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
     if (current_item_name) |name| {
         return try allocator.dupe(u8, name);
     }
-    return try allocator.dupe(u8, "Nothing is playing right now"); // duped too, so callers can always free unconditionally rather than needing to special-case this branch
+    return try allocator.dupe(u8, "Nothing is playing right now");
 }
 
 pub fn getCurrentQueue(allocator: std.mem.Allocator, io: std.Io) ![][]const u8 {
@@ -93,39 +87,17 @@ pub fn freeCurrentQueue(allocator: std.mem.Allocator, list: [][]const u8) void {
     allocator.free(list);
 }
 
-// pid of the currently-running ffmpeg, or -1 if nothing is playing right now.
-// Only ever *read* by the stop-handler thread and *written* by the player thread,
-// so a plain atomic is enough - no need to share the std.process.Child itself
-// across threads (that would risk two threads both calling wait() on it).
 var current_pid = std.atomic.Value(i32).init(-1);
-
-// Same idea, but for an in-progress yt-dlp download or TTS synthesis call -
-// kept separate from current_pid since those run on their own background
-// thread (see runAndTrackDownload), concurrently with whatever the player
-// thread might independently be doing, so a single shared pid var would risk
-// the two stepping on each other's tracking.
 var download_pid = std.atomic.Value(i32).init(-1);
 
-// Tracks whether the item *currently playing* (set by playOne, right before
-// playback) is yt-sourced. Read by setVolume/setYtVolume - called from the
-// main chat-dispatch thread, not the player thread - to decide whether a
-// volume change should touch the live sink right now: !volume should only
-// live-adjust non-yt audio, !ytvolume only yt audio, even though both still
-// always save their respective setting regardless of what's playing.
 var current_is_yt = std.atomic.Value(bool).init(false);
 
-// Runtime-tunable via !chance / !slow / !fast / !chancereverb / !reverbamount -
-// not persisted across restarts. slow_factor/fast_factor affect pitch AND speed
-// together (like a record played at the wrong speed) - 0.7 = deeper voice +
-// slower, 1.3 = higher voice + faster. reverb_chance_percent and reverb_amount
-// are rolled/applied completely independently of the pitch/speed effect, so a
-// sound can be slowed *and* reverby, sped up *and* reverby, or reverby on its own.
 const EffectSettings = struct {
     chance_percent: u32 = 10,
     slow_factor: f64 = 0.7,
-    fast_factor: f64 = 1.3, // a starting guess - tune with !fast if 1.3 isn't what you want
+    fast_factor: f64 = 1.3,
     reverb_chance_percent: u32 = 30,
-    reverb_amount: u32 = 80, // maps directly to sox's reverb "reverberance" 0-100
+    reverb_amount: u32 = 80,
 };
 
 var effect_mutex: std.Io.Mutex = .init;
@@ -194,9 +166,6 @@ pub fn setReverbAmount(io: std.Io, amount: u32) void {
     effect_settings.reverb_amount = amount;
 }
 
-// rollEffect/rollReverb now take `rand: std.Random` rather than reaching for
-// the removed std.crypto.random global - see sounds.zig for the fuller note
-// on how that gets constructed (std.Random.IoSource wrapping the caller's io).
 fn rollEffect(io: std.Io, rand: std.Random) Effect {
     const settings = getEffectSettings(io);
     const roll = rand.intRangeLessThan(u32, 0, 100);
@@ -245,10 +214,6 @@ pub fn resetMasterSettings(io: std.Io, sink: []const u8) void {
     }
 }
 
-// Always saves the setting regardless of what's playing, but only touches the
-// live sink if a non-yt item is currently playing - while a yt track is
-// playing, !volume saves for later without affecting what's audible right
-// now (only !ytvolume can do that - see setYtVolume below).
 pub fn setVolume(io: std.Io, percent: u32, sink: []const u8) void {
     master_mutex.lock(io) catch |err| {
         std.debug.print("[soundbot] Error setting master settings volume mutex {}", .{err});
@@ -261,9 +226,6 @@ pub fn setVolume(io: std.Io, percent: u32, sink: []const u8) void {
     }
 }
 
-// Mirror of setVolume for yt-sourced audio specifically - only touches the
-// live sink while a yt item is currently playing, otherwise just saves the
-// setting for the next time !yt plays something.
 pub fn setYtVolume(io: std.Io, percent: u32, sink: []const u8) void {
     master_mutex.lock(io) catch |err| {
         std.debug.print("[soundbot] Error setting master settings yt volume mutex {}", .{err});
@@ -293,8 +255,6 @@ pub fn setCompressorEnabled(io: std.Io, enabled: bool) void {
     master_settings.compressor_enabled = enabled;
 }
 
-// Setting specific values implies wanting the compressor active, so this
-// enables it too rather than requiring a separate !compressor on afterward.
 pub fn setCompressorParams(io: std.Io, threshold_percent: u32, ratio: f64, makeup: f64) void {
     master_mutex.lock(io) catch |err| {
         std.debug.print("[soundbot] Error setting master settings compressor mutex {}", .{err});
@@ -357,20 +317,6 @@ pub fn clearQueueAndStopCurrent(allocator: std.mem.Allocator, io: std.Io) void {
     std.debug.print("[soundbot] queue cleared, current sound/download stopped\n", .{});
 }
 
-// Unlike clearQueueAndStopCurrent, this never touches the rest of the queue -
-// the player thread just moves on to the next item once playOne returns.
-// Kills whichever of {current playback, an in-progress !yt/!tts download or
-// synthesis call} is actually active, since from a user's perspective "skip
-// this" reasonably means either one, regardless of which phase it's in.
-//
-// One known rough edge: if a playback kill lands during one of the brief
-// ffmpeg/sox pre-processing stages of an effect-laden clip (pitch/reverb/
-// compressor), rather than during final playback, the remaining stages still
-// run against the now-truncated intermediate file before reaching paplay -
-// so a skip timed exactly into that narrow window could produce a brief
-// glitch rather than an instant clean cut, rather than failing outright. Not
-// fixed here, since it would need threading a cancellation flag through
-// every stage of playFile for what's normally a very small window in practice.
 pub const SkipResult = enum { nothing, playback, download };
 
 pub fn skipCurrent() SkipResult {
@@ -389,7 +335,7 @@ pub fn skipCurrent() SkipResult {
         std.posix.kill(pid, std.posix.SIG.KILL) catch |err| {
             std.debug.print("[soundbot] failed to skip current playback: {}\n", .{err});
         };
-        result = .playback; // takes priority in the reported result on the rare chance both were active
+        result = .playback;
     }
 
     return result;
@@ -423,9 +369,6 @@ fn playOne(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, reverb
     const reverb_label: []const u8 = if (reverb) " (reverb)" else "";
     std.debug.print("[soundbot] playing {s}{s}{s}\n", .{ sound_path, effect_label, reverb_label });
 
-    // skip_effects is currently only ever true for !yt audio - reused here as
-    // the "is this yt audio" signal rather than adding a redundant parallel
-    // flag, since it's already exactly that signal everywhere else in this file.
     current_is_yt.store(skip_effects, .release);
     const master = getMasterSettings(ctx.io);
     applySinkVolume(ctx.io, ctx.sink, if (skip_effects) master.ytvolume_percent else master.volume_percent);
@@ -433,9 +376,6 @@ fn playOne(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, reverb
     runCmd(ctx.io, &.{ "xdotool", "keydown", ctx.ptt_key }) catch |err| {
         std.debug.print("[soundbot] keydown failed: {}\n", .{err});
     };
-    // Short margin so the PTT key has registered before audio starts - shrunk from
-    // an earlier, more conservative 200ms. If you ever see the very start of a clip
-    // clipped, bump this back up; if not, it can likely go even lower than this.
     ctx.io.sleep(.fromMilliseconds(50), .awake) catch {};
 
     playFile(ctx, sound_path, effect, reverb, skip_effects) catch |err| {
@@ -448,11 +388,7 @@ fn playOne(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, reverb
     };
 }
 
-// asetrate needs a literal numeric sample rate, not an expression (confirmed
-// the hard way - "sample_rate" is not a recognized constant in its eval
-// context). This gets the input file's actual rate via ffprobe so the pitch
-// shift's math is correct regardless of what rate any given file happens to
-// be at, rather than assuming a fixed value.
+// asetrate needs a literal numeric sample rate
 fn probeSampleRate(io: std.Io, sound_path: []const u8) !u32 {
     var child = try std.process.spawn(io, .{
         .argv = &.{
@@ -486,9 +422,6 @@ fn runAndTrackPid(io: std.Io, argv: []const []const u8, pid_var: *std.atomic.Val
 
     const pid = child.id orelse return error.NoPid;
     pid_var.store(@intCast(pid), .release);
-    // If a stop command killed it, this just returns (possibly with a non-zero
-    // exit status) instead of erroring - either way the caller still releases
-    // the PTT key (or otherwise handles cleanup) regardless of why it stopped.
     _ = child.wait(io) catch {};
     pid_var.store(-1, .release);
 }
@@ -497,10 +430,6 @@ pub fn runAndTrack(io: std.Io, argv: []const []const u8) !void {
     return runAndTrackPid(io, argv, &current_pid);
 }
 
-// For yt-dlp downloads and TTS synthesis - these run on their own background
-// thread (not the player thread), so tracking their pid separately from
-// current_pid lets !stop kill an in-progress download/synthesis call even
-// while something else is independently playing, and vice versa.
 pub fn runAndTrackDownload(io: std.Io, argv: []const []const u8) !void {
     return runAndTrackPid(io, argv, &download_pid);
 }
@@ -509,10 +438,6 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
     const master = getMasterSettings(ctx.io);
     const compressor_active = master.compressor_enabled and !skip_effects;
 
-    // Nothing active at all: same lightweight, format-specific fast paths as before.
-    // Volume is handled live via the sink itself now (see setVolume), so it no
-    // longer needs to route through here at all - only the compressor does,
-    // since that's genuine signal processing a sink-level gain knob can't do.
     if (effect == .none and !reverb and !compressor_active) {
         if (std.mem.endsWith(u8, sound_path, ".wav")) {
             return runAndTrack(ctx.io, &.{ "paplay", "--device", ctx.sink, sound_path });
@@ -523,13 +448,6 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
         return runAndTrack(ctx.io, &.{ "ffmpeg", "-nostdin", "-loglevel", "error", "-i", sound_path, "-f", "pulse", ctx.sink });
     }
 
-    // At least one of {pitch/speed, reverb, compressor} is active -
-    // route everything through one or more temp-file stages (plain file I/O,
-    // no live-device timing involved), then play the final result through the
-    // same paplay path already proven reliable. Writing effect-processed audio
-    // straight to the live pulse sink was the actual bug behind sped-up clips
-    // sometimes not being audible: ffmpeg can exit right after handing off the
-    // last chunk, before PulseAudio has actually finished draining it.
     var temp_paths: [3][]const u8 = undefined;
     var temp_count: usize = 0;
     defer {
@@ -543,11 +461,6 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
     var current_path: []const u8 = sound_path;
 
     if (effect != .none) {
-        // Combined pitch + speed change, tied together via the same factor -
-        // like a record played at the wrong speed: asetrate reinterprets the
-        // audio at a scaled sample rate, shifting pitch and tempo together.
-        // asetrate needs a literal number here, not an expression, so the
-        // file's actual rate is probed first rather than assumed.
         const factor: f64 = switch (effect) {
             .none => unreachable,
             .slow => getEffectSettings(ctx.io).slow_factor,
@@ -575,8 +488,6 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
     }
 
     if (reverb) {
-        // sox's "reverberance" parameter is already a plain 0-100 percentage,
-        // matching !reverbamount directly with no rescaling needed.
         const amount = getEffectSettings(ctx.io).reverb_amount;
         var amount_buf: [8]u8 = undefined;
         const amount_arg = try std.fmt.bufPrint(&amount_buf, "{d}", .{amount});
@@ -590,9 +501,6 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
     }
 
     if (compressor_active) {
-        // Threshold is kept on the same 0-100 scale as everything else in this
-        // bot and converted to ffmpeg's actual linear 0-1 range here, rather
-        // than exposing that raw range directly in chat commands.
         var filter_buf: [128]u8 = undefined;
         const threshold_linear = @as(f64, @floatFromInt(master.compressor_threshold_percent)) / 100.0;
         const filter_arg = try std.fmt.bufPrint(
@@ -615,10 +523,6 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
     try runAndTrack(ctx.io, &.{ "paplay", "--device", ctx.sink, current_path });
 }
 
-// io+rand added: io threads down into sounds.findSoundFile/findSoundFileFamily
-// (both now need it for directory access), rand into findSoundFileFamily (for
-// its random pick among numbered siblings) and into enqueueSound (for the
-// pitch/reverb roll).
 pub fn triggerSound(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, sounds_dir: []const u8, name: []const u8) !bool {
     if (try sounds.findSoundFile(allocator, io, sounds_dir, name)) |path| {
         try enqueueSound(allocator, io, rand, name, path, false, false);
@@ -636,9 +540,6 @@ pub fn triggerSound(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, 
 
 pub fn triggerRandomSound(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, sounds_dir: []const u8) !bool {
     if (try sounds.pickRandomSoundFile(allocator, io, rand, sounds_dir)) |path| {
-        // No !name was typed for a random pick, so the path's basename is the
-        // closest thing to a meaningful name (e.g. "cod14.mp3" rather than the
-        // full "sounds/cod14.mp3").
         try enqueueSound(allocator, io, rand, std.fs.path.basename(path), path, false, false);
         return true;
     }

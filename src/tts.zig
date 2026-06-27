@@ -1,23 +1,8 @@
 const std = @import("std");
 const playback = @import("playback.zig");
 
-// ---- Text-to-speech via Amazon Polly, through the AWS CLI ----
-// Calling Polly's API directly would mean implementing AWS SigV4 request
-// signing from scratch - a real cryptographic protocol, not something to
-// improvise without being able to test against live AWS. The AWS CLI already
-// handles that correctly, so it's used as a subprocess instead, the same way
-// this bot already shells out to ssh/ffmpeg/xdotool rather than reimplementing
-// any of those protocols either. Credentials (AWS_ACCESS_KEY_ID,
-// AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION) are expected as plain environment
-// variables on the container - the aws CLI picks those up on its own, and
-// std.process.Child inherits the parent's environment by default, so no
-// credential-handling code is needed here at all.
-
 const max_tts_chars = 150;
 
-// All standard-engine voices (no neural ones - those need a per-voice --engine
-// override, which got dropped along with Kevin, the only voice that needed it).
-// Add a new voice by adding a line here; no dispatch-logic changes needed.
 const TtsVoice = struct {
     cmd: []const u8,
     voice_id: []const u8,
@@ -107,13 +92,6 @@ pub fn handleTtsCommand(allocator: std.mem.Allocator, io: std.Io, rand: std.Rand
     };
 }
  
-// Thread entry point - same reasoning as youtube.zig's handleYtCommandThread:
-// running this synchronously in the chat-dispatch loop would block it for the
-// whole Polly call, during which !stop couldn't even be read from chat, let
-// alone act on it. voice_id/engine are static/null and don't need freeing;
-// raw_text does, since the caller must dupe it before spawning this (the
-// original slice it was trimmed from is freed at the end of that loop
-// iteration, long before a slow API call would actually return).
 pub fn handleTtsCommandThread(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, voice_id: []const u8, engine: ?[]const u8, raw_text: []u8) void {
     defer allocator.free(raw_text);
     handleTtsCommand(allocator, io, rand, voice_id, engine, raw_text);

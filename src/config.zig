@@ -44,9 +44,6 @@ fn getEnvOr(allocator: std.mem.Allocator, name: [*:0]const u8, default: []const 
 
 fn getEnvOptional(allocator: std.mem.Allocator, name: [*:0]const u8) !?[]const u8 {
     const value = getEnvRaw(name) orelse return null;
-    // docker-compose's ${VAR:-} syntax sets an *empty* env var rather than
-    // leaving it truly absent when VAR isn't provided on the host - treat
-    // that the same as "not set" instead of as an explicit empty path.
     if (value.len == 0) return null;
     return try allocator.dupe(u8, value);
 }

@@ -13,9 +13,8 @@ const help_text =
     \\Commands:
     \\
     \\* !<name> - play a sound (see !sounds for the list)
-    \\* !r - play a random sound (see !sounds for the list)
-    \\* !random - same as !r
-    \\* !sequence <name1> <name2> - play a sequence of sounds (see !sounds for the list)
+    \\* !random (!r) - play a random sound (see !sounds for the list)
+    \\* !sequence (!seq) <name1> <name2> - play a sequence of sounds (see !sounds for the list)
     \\* !skip - skip current sound or cancel an in-progress download; queue keeps playing
     \\* !stop - clear the queue, stop current playback
     \\* !current - show what's playing right now
@@ -117,9 +116,6 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
 
-    // Random source for the pitch/reverb roll and the random-voice/random-pick
-    // commands - replaces the removed std.crypto.random global. Confirmed
-    // directly against the official release notes' Entropy migration guide.
     const rng_impl: std.Random.IoSource = .{ .io = io };
     const rand = rng_impl.interface();
 
@@ -127,8 +123,6 @@ pub fn main(init: std.process.Init) !void {
 
     const cfg = try Config.load(allocator);
     youtube.setCookiesPath(io, cfg.yt_cookies_path);
-
-    playback.initQueue();
 
     const player_ctx = try allocator.create(playback.PlayerCtx);
     player_ctx.* = .{
@@ -194,10 +188,7 @@ pub fn main(init: std.process.Init) !void {
     };
     defer allocator.free(clid);
 
-    // 3. Move into the configured channel.
     try query.doCommand(allocator, io, stdin, &line_reader, "clientmove (startup)", "clientmove clid={s} cid={s}", .{ clid, cfg.channel_id });
-
-    // 4. Register for chat notifications: per-channel (for normal triggers)
     try query.doCommand(allocator, io, stdin, &line_reader, "servernotifyregister textchannel", "servernotifyregister event=textchannel", .{});
 
     std.debug.print("[soundbot] ready - watching channel {s} for commands\n", .{cfg.channel_id});
@@ -205,7 +196,6 @@ pub fn main(init: std.process.Init) !void {
     const keepalive_thread = try std.Thread.spawn(.{}, query.keepaliveLoop, .{ io, stdin });
     keepalive_thread.detach();
 
-    // 5. Main loop: read lines forever, react to notifytextmessage.
     while (true) {
         const maybe_line = try line_reader.readLine(allocator);
         const line = maybe_line orelse break; // ssh connection closed
@@ -221,7 +211,6 @@ pub fn main(init: std.process.Init) !void {
         if (!std.mem.startsWith(u8, msg, "!")) continue;
         const after_bang = msg[1..];
 
-        // Command name is everything up to the first whitespace (so "!sound1 extra text" still works).
         var name_end: usize = 0;
         while (name_end < after_bang.len and !std.ascii.isWhitespace(after_bang[name_end])) : (name_end += 1) {}
         const name = after_bang[0..name_end];
@@ -565,9 +554,6 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             };
 
-            // Bounds match ffmpeg's own acompressor limits, so an out-of-range
-            // value fails clearly here instead of being silently rejected/clamped
-            // by ffmpeg later with no chat feedback at all.
             if (threshold_percent < 1 or threshold_percent > 100) {
                 query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Threshold must be 1-100.");
                 continue;
@@ -592,7 +578,7 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
 
-        if (std.mem.eql(u8, name, "sequence")) {
+        if (std.mem.eql(u8, name, "seq") or std.mem.eql(u8, name, "sequence")) {
             const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
             var parts = std.mem.splitScalar(u8, rest, ' ');
 

@@ -38,7 +38,6 @@ pub fn findSoundFileFamily(allocator: std.mem.Allocator, io: std.Io, rand: std.R
         if (entry.kind != .file) continue;
         if (!std.mem.startsWith(u8, entry.name, name)) continue;
 
-        // Everything between the name and the extension's dot must be all digits.
         const rest = entry.name[name.len..];
         const dot_index = std.mem.indexOfScalar(u8, rest, '.') orelse continue;
         const digits_part = rest[0..dot_index];
@@ -78,8 +77,6 @@ pub fn buildSoundsList(allocator: std.mem.Allocator, io: std.Io, sounds_dir: []c
     var dir = try std.Io.Dir.cwd().openDir(io, sounds_dir, .{ .iterate = true });
     defer dir.close(io);
 
-    // group key (family prefix, or the bare name for files with no numeric
-    // suffix) -> list of individual member names (empty for non-family files).
     var groups: std.StringHashMap(std.ArrayList([]u8)) = .init(allocator);
     defer {
         var it = groups.iterator();
