@@ -8,30 +8,22 @@ itself — lives inside the image.
 ## Repo layout
 
 ```
-your-repo/
-├── .github/workflows/docker-build.yml   <- builds + pushes to GHCR on push to main
-├── soundbot/
-│   ├── Dockerfile
-│   ├── build.zig
-│   ├── src/
-│   │   ├── main.zig        (entrypoint + chat dispatch loop)
-│   │   ├── config.zig      (env-var loading)
-│   │   ├── ts_protocol.zig (TS3/TS6 string escaping, field extraction)
-│   │   ├── sounds.zig      (sound-file lookup, !sounds list)
-│   │   ├── query.zig       (ServerQuery I/O, chat replies, client/channel lookups)
-│   │   ├── playback.zig    (queue, pitch/speed effects, the player thread)
-│   │   ├── tts.zig         (Amazon Polly via the AWS CLI)
-│   │   └── youtube.zig     (yt-dlp playback)
-│   └── scripts/entrypoint.sh
+soundbot/
+├── .github/workflows/main.yml
+├── Dockerfile
+├── build.zig
+├── src/
+│   ├── main.zig        (entrypoint + chat dispatch loop)
+│   ├── config.zig      (env-var loading)
+│   ├── ts_protocol.zig (TS3/TS6 string escaping, field extraction)
+│   ├── sounds.zig      (sound-file lookup, !sounds list)
+│   ├── query.zig       (ServerQuery I/O, chat replies, client/channel lookups)
+│   ├── playback.zig    (queue, pitch/speed effects, the player thread)
+│   ├── tts.zig         (Amazon Polly via the AWS CLI)
+│   └── youtube.zig     (yt-dlp playback)
+├── scripts/entrypoint.sh
 └── docker-compose.soundbot.yml          <- for the HOST, not really part of the image build
 ```
-
-Push this to GitHub, and the workflow builds + pushes
-`ghcr.io/<your-github-username>/<repo-name>:latest` automatically.
-
-**GHCR packages are private by default.** Either:
-- make the package public (repo → Packages → the package → Package settings → Change visibility), or
-- on the VPS, `docker login ghcr.io` with a Personal Access Token that has `read:packages` scope, before pulling.
 
 ## What the host actually needs
 
@@ -39,26 +31,8 @@ Push this to GitHub, and the workflow builds + pushes
 deploy-dir/
 ├── docker-compose.yml          ← your existing TS6 server compose file, untouched
 ├── docker-compose.soundbot.yml ← copy from this repo
-├── .env                        ← secrets + image reference, you create this
 ├── teamspeak-client/           ← you provide: download from teamspeak.com yourself, extract here
 └── sounds/                     ← you provide: your sound files, named soundN.ext or anything.ext
-```
-
-That's it — no Zig, no apt installs, no build step on the VPS at all.
-
-### `.env`
-
-```
-SOUNDBOT_IMAGE=ghcr.io/yourname/yourrepo:latest
-TS_SSH_PASS=<password from queryloginadd>
-TS_CHANNEL_ID=2
-TS_VOICE_NICKNAME=SoundBot
-
-# For !ttsg/!ttsk/!ttsb/!tts (Amazon Polly) - omit these and the tts commands
-# just fail with an auth error in the logs; everything else still works fine.
-AWS_ACCESS_KEY_ID=<from an IAM user with polly:SynthesizeSpeech permission>
-AWS_SECRET_ACCESS_KEY=<...>
-AWS_DEFAULT_REGION=us-east-1
 ```
 
 ### ServerQuery account (one-time, on the TS6 server itself)
@@ -77,7 +51,7 @@ docker compose -f docker-compose.yml -f docker-compose.soundbot.yml pull
 docker compose -f docker-compose.yml -f docker-compose.soundbot.yml up -d
 ```
 
-## One-time manual setup (the part that isn't automated)
+## One-time manual setup
 
 The TS6 client needs to connect and have its capture device set once:
 
@@ -97,7 +71,13 @@ testing deliberately rather than assuming.
 
 ## Updating
 
-Push to `main` → CI rebuilds the image → on the VPS:
+1. Update docker image in docker-compose.soundbot.yml
+2. Stop running soundbot container:
+```bash
+docker stop soundbot
+```
+3. Wait for the bot to disconnect from the server
+4.
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.soundbot.yml pull
 docker compose -f docker-compose.yml -f docker-compose.soundbot.yml up -d
@@ -154,13 +134,7 @@ docker compose -f docker-compose.yml -f docker-compose.soundbot.yml up -d
   just YouTube, so this isn't actually restricted to youtube.com links -
   anything yt-dlp recognizes will work.
 
-**If `!yt` fails with "Sign in to confirm you're not a bot"**: this is YouTube's
-bot-detection, and it hits datacenter/VPS IPs (exactly what this runs on)
-especially hard. The bot already spoofs the Android client as the most
-commonly reported fix that needs no credentials - if that's not enough for a
-given video, the more reliable fallback is supplying real cookies from a
-logged-in YouTube account:
- 
+**If `!yt` fails with "Sign in to confirm you're not a bot"** (https://github.com/yt-dlp/yt-dlp/wiki/Extractors#youtube):
 1. On your own PC, while logged into YouTube in a browser, export cookies to a
    `cookies.txt` file (a "Get cookies.txt" browser extension is the easiest way).
 2. Copy that file onto the VPS, next to `docker-compose.soundbot.yml`, named
@@ -172,49 +146,15 @@ logged-in YouTube account:
 4. `docker compose -f docker-compose.yml -f docker-compose.soundbot.yml up -d`
    to pick it up.
 
-**Important behavior change**: because the secret is declared at the top level,
-`cookies.txt` is now a file Compose expects to exist for *any* `up`, not just
-when you actually want cookies enabled - if you don't want to use this feature
-yet, create an empty placeholder (`touch cookies.txt`) so Compose doesn't
-refuse to start the whole stack over a missing file. An empty file is harmless
-- yt-dlp just finds no cookies in it and proceeds without authentication,
-same as if `TS_YT_COOKIES_PATH` were never set at all.
-If you'd rather avoid that requirement entirely, the bot still also checks the
-old conventional bind-mount path (`/opt/soundbot/cookies.txt`) as a fallback if
-you set things up that way instead - but the secret is the better-practice
-default now.
- 
-Worth deciding deliberately rather than defaulting into it: this puts a real
-account's session on the server, with some risk of that account getting
-rate-limited or flagged if it's used this way a lot. Also worth knowing:
-exported cookies are a frozen snapshot, not a live link to your browser
-session - they'll eventually stop working as Google rotates session state
-server-side, and `!yt` failing with this same error again later is the
-symptom, not a new bug. Re-exporting a fresh `cookies.txt` is the fix each
-time. A secondary account dedicated to this is worth considering over your
-main one, given that recurring need.
-
 ## Logs
 
 ```bash
 docker logs -f soundbot
 ```
 
-## Known gaps, stated plainly
+## Known gaps
 
-- Ctrl+C/container-stop sends a clean `quit` to the ServerQuery session, but
-  doesn't kill an in-flight `ffmpeg`/release the PTT key first.
-- `!sounds`/`!voices` reply in chat, but most other commands (`!tts`, `!yt`,
-  `!chance`, etc.) only log to `docker logs` - no chat confirmation that they
-  actually worked.
+- Ctrl+C/container-stop doesn't kill an in-flight `ffmpeg`/release the PTT key first.
 - `!yt` lets anyone in the channel make the bot fetch from the open internet.
   There's a length cap but no rate limit, cooldown, or per-user restriction -
   worth keeping in mind if the server has people you don't fully trust.
-- `!yt`/`!tts*` run on their own background thread specifically so `!stop` can
-  actually interrupt an in-progress download/synthesis call (without that, the
-  chat-reading loop itself would be blocked for the whole call, meaning
-  `!stop` couldn't even be read until it finished anyway). One real limitation
-  from that: if two such calls happen to be in flight at once (e.g. `!yt` and
-  `!ttsb` fired back to back before either finishes), they share a single
-  pid-tracking slot, so `!stop` reliably kills whichever one most recently
-  claimed it, not necessarily both.
