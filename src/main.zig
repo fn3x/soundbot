@@ -18,6 +18,8 @@ const help_text =
     \\* !sequence <name1> <name2> - play a sequence of sounds (see !sounds for the list)
     \\* !skip - skip current sound or cancel an in-progress download; queue keeps playing
     \\* !stop - clear the queue, stop current playback
+    \\* !current - show what's playing right now
+    \\* !queue - show what's waiting in the queue
     \\* !sounds - list available sound triggers
     \\* !voices - list available TTS voices
     \\* !ttsg/!ttsb/!ttsjo/!ttsma/!ttssa/!ttsam/!ttsem/!ttsju/!ttsni/!ttsca/!ttsm/!ttst <text> - text-to-speech (see !voices)
@@ -84,6 +86,28 @@ fn buildStatusText(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
         try out.appendSlice(allocator, "* !ytlength: 0 (no cap)\n");
     } else {
         try out.appendSlice(allocator, std.fmt.bufPrint(&buf, "* !ytlength: {d}\n", .{yt_len}) catch "* !ytlength: (error formatting)\n");
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn buildQueueText(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
+    const queue_names = try playback.getCurrentQueue(allocator, io);
+    defer playback.freeCurrentQueue(allocator, queue_names);
+
+    if (queue_names.len == 0) {
+        return try allocator.dupe(u8, "Queue is empty.");
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var buf: [16]u8 = undefined;
+
+    try out.appendSlice(allocator, std.fmt.bufPrint(&buf, "Queue ({d}):\n\n", .{queue_names.len}) catch "Queue:\n\n");
+    for (queue_names, 0..) |item_name, i| {
+        try out.appendSlice(allocator, std.fmt.bufPrint(&buf, "{d}. ", .{i + 1}) catch "- ");
+        try out.appendSlice(allocator, item_name);
+        try out.append(allocator, '\n');
     }
 
     return out.toOwnedSlice(allocator);
@@ -249,6 +273,26 @@ pub fn main(init: std.process.Init) !void {
                 .playback => query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Skipped - playing the next sound in queue."),
                 .download => query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Cancelled the in-progress download/synthesis."),
             }
+            continue;
+        }
+
+        if (std.mem.eql(u8, name, "current")) {
+            const current_name = playback.getCurrentName(allocator, io) catch |err| {
+                std.debug.print("[soundbot] failed to get current name: {}\n", .{err});
+                continue;
+            };
+            defer allocator.free(current_name);
+            query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, current_name);
+            continue;
+        }
+
+        if (std.mem.eql(u8, name, "queue")) {
+            const queue_msg = buildQueueText(allocator, io) catch |err| {
+                std.debug.print("[soundbot] failed to build queue text: {}\n", .{err});
+                continue;
+            };
+            defer allocator.free(queue_msg);
+            query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, queue_msg);
             continue;
         }
 

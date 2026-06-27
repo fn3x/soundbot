@@ -97,7 +97,11 @@ pub fn handleTtsCommand(allocator: std.mem.Allocator, io: std.Io, rand: std.Rand
         return;
     };
  
-    _ = playback.enqueueSound(allocator, io, rand, out_path, true, false) catch |err| {
+    var name_buf: [64]u8 = undefined;
+    const text_preview_len = @min(text.len, 40);
+    const display_name = std.fmt.bufPrint(&name_buf, "tts ({s}): {s}", .{ voice_id, text[0..text_preview_len] }) catch "tts";
+
+    _ = playback.enqueueSound(allocator, io, rand, display_name, out_path, true, false) catch |err| {
         std.debug.print("[soundbot] failed to queue tts output: {}\n", .{err});
         allocator.free(out_path);
     };

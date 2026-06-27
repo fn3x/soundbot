@@ -151,7 +151,11 @@ pub fn handleYtCommand(allocator: std.mem.Allocator, io: std.Io, rand: std.Rando
         return;
     };
 
-    playback.enqueueSound(allocator, io, rand, out_path, true, true) catch |err| {
+    var name_buf: [64]u8 = undefined;
+    const query_preview_len = @min(raw_query.len, 50);
+    const display_name = std.fmt.bufPrint(&name_buf, "yt: {s}", .{raw_query[0..query_preview_len]}) catch "yt";
+
+    playback.enqueueSound(allocator, io, rand, display_name, out_path, true, true) catch |err| {
         std.debug.print("[soundbot] failed to queue yt-dlp output: {}\n", .{err});
         allocator.free(out_path);
     };

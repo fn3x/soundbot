@@ -107,6 +107,8 @@ docker compose -f docker-compose.yml -f docker-compose.soundbot.yml up -d
 - `!help` — replies in chat with the full command reference
 - `!default` — reset effect and master settings to default values
 - `!status` — show current effect and master settings
+- `!current` - show what's playing right now
+- `!queue` - show what's waiting in the queue
 - `!sound1`, `!test_sound`, etc. — plays the matching file; queued if something's already playing
 - `!r` or `!random` - queue a random sound
 - `!sequence <name1> <name2>` - queue a sequence of sounds

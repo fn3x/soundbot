@@ -15,6 +15,7 @@ fn runCmd(io: std.Io, argv: []const []const u8) !void {
 const Effect = enum { none, slow, fast };
 
 const QueueItem = struct {
+    name: []const u8,
     sound_path: []const u8,
     effect: Effect,
     reverb: bool, // independent of effect - can combine with none/slow/fast alike
@@ -30,6 +31,66 @@ var sound_queue: std.ArrayList(QueueItem) = undefined; // initialized via initQu
 // std.ArrayList(QueueItem) directly - this is the public init entry point instead.
 pub fn initQueue() void {
     sound_queue = .empty;
+}
+
+var current_item_name: ?[]u8 = null;
+
+fn setCurrentName(allocator: std.mem.Allocator, io: std.Io, name: []const u8) void {
+    queue_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] queue mutex lock error on setting current name: {}\n", .{err});
+        return;
+    };
+    defer queue_mutex.unlock(io);
+    if (current_item_name) |old| allocator.free(old);
+    current_item_name = allocator.dupe(u8, name) catch |err| {
+        std.debug.print("[soundbot] failed to set current name: {}\n", .{err});
+        return;
+    };
+}
+
+fn clearCurrentName(allocator: std.mem.Allocator, io: std.Io) void {
+    queue_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] queue mutex lock error on clearing current name: {}\n", .{err});
+        return;
+    };
+    defer queue_mutex.unlock(io);
+    if (current_item_name) |old| allocator.free(old);
+    current_item_name = null;
+}
+
+pub fn getCurrentName(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
+    queue_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] queue mutex lock error on getting current name: {}\n", .{err});
+        return err;
+    };
+    defer queue_mutex.unlock(io);
+    if (current_item_name) |name| {
+        return try allocator.dupe(u8, name);
+    }
+    return try allocator.dupe(u8, "Nothing is playing right now"); // duped too, so callers can always free unconditionally rather than needing to special-case this branch
+}
+
+pub fn getCurrentQueue(allocator: std.mem.Allocator, io: std.Io) ![][]const u8 {
+    queue_mutex.lock(io) catch |err| {
+        std.debug.print("[soundbot] queue mutex lock error on getting current queue: {}\n", .{err});
+        return err;
+    };
+    defer queue_mutex.unlock(io);
+
+    var queue_list: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (queue_list.items) |name| allocator.free(name);
+        queue_list.deinit(allocator);
+    }
+    for (sound_queue.items) |item| {
+        try queue_list.append(allocator, try allocator.dupe(u8, item.name));
+    }
+    return queue_list.toOwnedSlice(allocator);
+}
+
+pub fn freeCurrentQueue(allocator: std.mem.Allocator, list: [][]const u8) void {
+    for (list) |name| allocator.free(name);
+    allocator.free(list);
 }
 
 // pid of the currently-running ffmpeg, or -1 if nothing is playing right now.
@@ -253,15 +314,17 @@ pub const PlayerCtx = struct {
     sink: []const u8,
 };
 
-pub fn enqueueSound(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, sound_path: []const u8, delete_after: bool, skip_effects: bool) !void {
+pub fn enqueueSound(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, name: []const u8, sound_path: []const u8, delete_after: bool, skip_effects: bool) !void {
     const effect: Effect = if (skip_effects) .none else rollEffect(io, rand);
     const reverb: bool = if (skip_effects) false else rollReverb(io, rand);
+    const owned_name = try allocator.dupe(u8, name);
+    errdefer allocator.free(owned_name);
     queue_mutex.lock(io) catch |err| {
         std.debug.print("[soundbot] Error locking queue mutex {}", .{err});
         return;
     };
     defer queue_mutex.unlock(io);
-    try sound_queue.append(allocator, .{ .sound_path = sound_path, .effect = effect, .reverb = reverb, .skip_effects = skip_effects, .delete_after = delete_after });
+    try sound_queue.append(allocator, .{ .name = owned_name, .sound_path = sound_path, .effect = effect, .reverb = reverb, .skip_effects = skip_effects, .delete_after = delete_after });
     queue_cond.signal(io);
 }
 
@@ -341,9 +404,13 @@ pub fn playerLoop(ctx: *const PlayerCtx) !void {
         const item = sound_queue.orderedRemove(0);
         queue_mutex.unlock(ctx.io);
 
+        setCurrentName(ctx.allocator, ctx.io, item.name);
         playOne(ctx, item.sound_path, item.effect, item.reverb, item.skip_effects);
+        clearCurrentName(ctx.allocator, ctx.io);
+
         if (item.delete_after) std.Io.Dir.cwd().deleteFile(ctx.io, item.sound_path) catch {};
         ctx.allocator.free(item.sound_path);
+        ctx.allocator.free(item.name);
     }
 }
 
@@ -554,12 +621,12 @@ fn playFile(ctx: *const PlayerCtx, sound_path: []const u8, effect: Effect, rever
 // pitch/reverb roll).
 pub fn triggerSound(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, sounds_dir: []const u8, name: []const u8) !bool {
     if (try sounds.findSoundFile(allocator, io, sounds_dir, name)) |path| {
-        try enqueueSound(allocator, io, rand, path, false, false);
+        try enqueueSound(allocator, io, rand, name, path, false, false);
         return true;
     }
 
     if (try sounds.findSoundFileFamily(allocator, io, rand, sounds_dir, name)) |path| {
-        try enqueueSound(allocator, io, rand, path, false, false);
+        try enqueueSound(allocator, io, rand, name, path, false, false);
         return true;
     }
 
@@ -569,7 +636,10 @@ pub fn triggerSound(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, 
 
 pub fn triggerRandomSound(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, sounds_dir: []const u8) !bool {
     if (try sounds.pickRandomSoundFile(allocator, io, rand, sounds_dir)) |path| {
-        try enqueueSound(allocator, io, rand, path, false, false);
+        // No !name was typed for a random pick, so the path's basename is the
+        // closest thing to a meaningful name (e.g. "cod14.mp3" rather than the
+        // full "sounds/cod14.mp3").
+        try enqueueSound(allocator, io, rand, std.fs.path.basename(path), path, false, false);
         return true;
     }
     return false;
