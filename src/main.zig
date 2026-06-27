@@ -583,6 +583,9 @@ pub fn main(init: std.process.Init) !void {
 
         if (std.mem.eql(u8, name, "seq") or std.mem.eql(u8, name, "sequence")) {
             const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
+
+            _ = std.ascii.lowerString(rest, rest);
+
             var parts = std.mem.splitScalar(u8, rest, ' ');
 
             while (parts.next()) |sound| {
