@@ -6,6 +6,9 @@ const query = @import("query.zig");
 const playback = @import("playback.zig");
 const tts = @import("tts.zig");
 const youtube = @import("youtube.zig");
+const tg_bot = @import("telegram/bot.zig");
+const tg_queries = @import("telegram/queries.zig");
+const tg_queue = @import("telegram/queue.zig");
 
 const Config = config_mod.Config;
 
@@ -133,6 +136,24 @@ pub fn main(init: std.process.Init) !void {
     };
     const player_thread = try std.Thread.spawn(.{}, playback.playerLoop, .{player_ctx});
     player_thread.detach();
+
+    if (cfg.tg_bot_token) |token| {
+        const chat_ids = cfg.tg_chat_ids.?;
+ 
+        const tg_client = try allocator.create(tg_queries.TgClient);
+        tg_client.* = tg_queries.TgClient.init(allocator, io, token);
+ 
+        const button_queue = try allocator.create(tg_queue.ButtonQueue);
+        button_queue.* = tg_queue.ButtonQueue.init();
+ 
+        const tg_poll_thread = try std.Thread.spawn(.{}, tg_bot.pollLoop, .{ allocator, io, tg_client, chat_ids, cfg.sounds_dir, button_queue });
+        tg_poll_thread.detach();
+ 
+        const tg_consume_thread = try std.Thread.spawn(.{}, tg_bot.consumeButtonPresses, .{ allocator, io, rand, button_queue, cfg.sounds_dir });
+        tg_consume_thread.detach();
+ 
+        std.debug.print("[soundbot] Telegram bot active for {d} chat(s)\n", .{chat_ids.len});
+    }
 
     const target = try std.fmt.allocPrint(allocator, "{s}@{s}", .{ cfg.ssh_user, cfg.ssh_host });
     defer allocator.free(target);

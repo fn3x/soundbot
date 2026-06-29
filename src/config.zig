@@ -12,8 +12,32 @@ pub const Config = struct {
     ptt_key: []const u8,
     voice_nickname: []const u8,
     yt_cookies_path: ?[]const u8,
+    tg_bot_token: ?[]const u8,
+    tg_chat_ids: ?[]i64,
 
     pub fn load(allocator: std.mem.Allocator) !Config {
+        const tg_bot_token = try getEnvOptional(allocator, "TG_BOT_TOKEN");
+
+        const tg_chat_ids: ?[]i64 = if (tg_bot_token != null) blk: {
+            const raw = try getEnvRequired(allocator, "TG_CHAT_IDS");
+            defer allocator.free(raw);
+            var ids: std.ArrayList(i64) = .empty;
+            var it = std.mem.splitScalar(u8, raw, ',');
+            while (it.next()) |part| {
+                const trimmed = std.mem.trim(u8, part, " ");
+                const id = std.fmt.parseInt(i64, trimmed, 10) catch {
+                    std.debug.print("TG_CHAT_IDS: '{s}' is not a valid integer\n", .{trimmed});
+                    return error.InvalidTgChatId;
+                };
+                try ids.append(allocator, id);
+            }
+            if (ids.items.len == 0) {
+                std.debug.print("TG_CHAT_IDS must contain at least one chat id\n", .{});
+                return error.InvalidTgChatId;
+            }
+            break :blk try ids.toOwnedSlice(allocator);
+        } else null;
+
         return Config{
             .ssh_host = try getEnvOr(allocator, "TS_SSH_HOST", "127.0.0.1"),
             .ssh_port = try getEnvOr(allocator, "TS_SSH_PORT", "10022"),
@@ -26,6 +50,8 @@ pub const Config = struct {
             .ptt_key = try getEnvOr(allocator, "TS_PTT_KEY", "F12"),
             .voice_nickname = try getEnvRequired(allocator, "TS_VOICE_NICKNAME"),
             .yt_cookies_path = try getEnvOptional(allocator, "TS_YT_COOKIES_PATH"),
+            .tg_bot_token = tg_bot_token,
+            .tg_chat_ids = tg_chat_ids,
         };
     }
 };
