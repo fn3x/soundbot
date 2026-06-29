@@ -22,7 +22,7 @@ soundbot/
 │   ├── tts.zig         (Amazon Polly via the AWS CLI)
 │   └── youtube.zig     (yt-dlp playback)
 ├── scripts/entrypoint.sh
-└── docker-compose.soundbot.yml          <- for the HOST, not really part of the image build
+└── docker-compose.soundbot.yml
 ```
 
 ## What the host actually needs

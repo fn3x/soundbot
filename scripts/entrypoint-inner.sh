@@ -10,7 +10,7 @@ DISPLAY_NUM="${DISPLAY#:}"
 rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
 
 echo "[entrypoint] starting Xvfb on $DISPLAY"
-Xvfb "$DISPLAY" -screen 0 1024x768x24 &
+Xvfb "$DISPLAY" -screen 0 800x800x16 &
 for i in $(seq 1 20); do
     if xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
         echo "[entrypoint] Xvfb is ready"

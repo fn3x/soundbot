@@ -13,7 +13,10 @@ pub fn sendCommand(allocator: std.mem.Allocator, io: std.Io, stdin: std.Io.File,
 
 pub fn keepaliveLoop(io: std.Io, stdin: std.Io.File) void {
     while (true) {
-        io.sleep(.fromSeconds(60), .awake) catch {};
+        io.sleep(.fromSeconds(60), .awake) catch |err| {
+            std.debug.print("[soundbot] keepalive sleep failed, stopping keepalive thread: {}\n", .{err});
+            return;
+        };
         stdin_mutex.lock(io) catch {};
         defer stdin_mutex.unlock(io);
         stdin.writeStreamingAll(io, "version\n") catch |err| {
