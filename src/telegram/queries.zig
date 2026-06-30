@@ -77,7 +77,7 @@ pub const TgClient = struct {
     }
 
     pub fn editMessageReplyMarkup(self: *Self, allocator: std.mem.Allocator, params: structs.EditMessageReplyMarkupParams) void {
-        _ = self.post(bool, allocator, "editMessageReplyMarkup", params) catch |err| {
+        _ = self.post(std.json.Value, allocator, "editMessageReplyMarkup", params) catch |err| {
             std.debug.print("[telegram] editMessageReplyMarkup failed: {}\n", .{err});
         };
     }
