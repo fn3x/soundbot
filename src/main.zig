@@ -139,6 +139,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (cfg.tg_bot_token) |token| {
         const chat_ids = cfg.tg_chat_ids.?;
+        const favorites_folder = cfg.tg_favorites_folder.?;
  
         const tg_client = try allocator.create(tg_queries.TgClient);
         tg_client.* = tg_queries.TgClient.init(allocator, io, token);
@@ -146,7 +147,7 @@ pub fn main(init: std.process.Init) !void {
         const button_queue = try allocator.create(tg_queue.ButtonQueue);
         button_queue.* = tg_queue.ButtonQueue.init();
  
-        const tg_poll_thread = try std.Thread.spawn(.{}, tg_bot.pollLoop, .{ allocator, io, tg_client, chat_ids, cfg.sounds_dir, button_queue });
+        const tg_poll_thread = try std.Thread.spawn(.{}, tg_bot.pollLoop, .{ allocator, io, tg_client, chat_ids, favorites_folder, cfg.sounds_dir, button_queue });
         tg_poll_thread.detach();
  
         const tg_consume_thread = try std.Thread.spawn(.{}, tg_bot.consumeButtonPresses, .{ allocator, io, rand, button_queue, cfg.sounds_dir });
