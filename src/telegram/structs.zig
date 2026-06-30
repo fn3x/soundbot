@@ -57,11 +57,9 @@ pub const IncomingMessage = struct {
     message_id: i64,
     chat: Chat,
     text: ?[]const u8 = null,
-    from: ?User = null,
 };
 
 pub const AnswerCallbackQueryParams = struct {
     callback_query_id: []const u8,
     text: ?[]const u8 = null,
-    show_alert: bool = false,
 };
