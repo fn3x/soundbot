@@ -1,37 +1,56 @@
-pub const KeyboardButton = struct {
+pub const InlineKeyboardButton = struct {
     text: []const u8,
+    callback_data: ?[]const u8,
 };
 
-pub const ReplyKeyboardMarkup = struct {
-    keyboard: []const []const KeyboardButton,
-    resize_keyboard: bool = true,
-    one_time_keyboard: bool = false,
-};
-
-pub const ReplyKeyboardRemove = struct {
-    remove_keyboard: bool = true,
+pub const InlineKeyboardMarkup = struct {
+    inline_keyboard: []const []const InlineKeyboardButton,
 };
 
 pub const SendMessageParams = struct {
     chat_id: i64,
     text: []const u8,
-    reply_markup: ?ReplyKeyboardMarkup = null,
+    reply_markup: ?InlineKeyboardMarkup = null,
 };
 
-pub const SendMessageRemoveKeyboardParams = struct {
+pub const EditMessageReplyMarkupParams = struct {
     chat_id: i64,
-    text: []const u8,
-    reply_markup: ReplyKeyboardRemove = .{},
+    message_id: i64,
+    reply_markup: ?InlineKeyboardMarkup = null,
 };
 
 pub const GetUpdatesParams = struct {
     offset: ?i64 = null,
     timeout: i64 = 30,
-    allowed_updates: []const []const u8 = &.{"message"},
+    allowed_updates: []const []const u8 = &.{ "callback_query", "message" },
 };
 
 pub const Chat = struct {
     id: i64,
+};
+
+pub const Message = struct {
+    message_id: i64,
+    chat: Chat,
+};
+
+pub const User = struct {
+    id: i64,
+    is_bot: bool,
+    first_name: []const u8,
+};
+
+pub const CallbackQuery = struct {
+    id: []const u8,
+    from: User,
+    message: ?Message = null,
+    data: ?[]const u8 = null,
+};
+
+pub const Update = struct {
+    update_id: i64,
+    callback_query: ?CallbackQuery = null,
+    message: ?IncomingMessage = null,
 };
 
 pub const IncomingMessage = struct {
@@ -40,11 +59,7 @@ pub const IncomingMessage = struct {
     text: ?[]const u8 = null,
 };
 
-pub const Update = struct {
-    update_id: i64,
-    message: ?IncomingMessage = null,
-};
-
-pub const SentMessage = struct {
-    message_id: i64,
+pub const AnswerCallbackQueryParams = struct {
+    callback_query_id: []const u8,
+    text: ?[]const u8 = null,
 };
