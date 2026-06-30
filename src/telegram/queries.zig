@@ -82,12 +82,6 @@ pub const TgClient = struct {
         };
     }
 
-    pub fn editMessageText(self: *Self, allocator: std.mem.Allocator, params: structs.EditMessageTextParams) void {
-        _ = self.post(std.json.Value, allocator, "editMessageText", params) catch |err| {
-            std.debug.print("[telegram] editMessageText failed: {}\n", .{err});
-        };
-    }
-
     pub fn answerCallbackQuery(self: *Self, allocator: std.mem.Allocator, params: structs.AnswerCallbackQueryParams) void {
         _ = self.post(bool, allocator, "answerCallbackQuery", params) catch |err| {
             std.debug.print("[telegram] answerCallbackQuery failed: {}\n", .{err});

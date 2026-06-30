@@ -19,13 +19,6 @@ pub const EditMessageReplyMarkupParams = struct {
     reply_markup: ?InlineKeyboardMarkup = null,
 };
 
-pub const EditMessageTextParams = struct {
-    chat_id: i64,
-    message_id: i64,
-    text: []const u8,
-    reply_markup: ?InlineKeyboardMarkup = null,
-};
-
 pub const GetUpdatesParams = struct {
     offset: ?i64 = null,
     timeout: i64 = 30,

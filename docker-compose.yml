@@ -24,16 +24,11 @@ services:
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-eu-central-1}
       # For bypassing youtube restrictions
       - TS_YT_COOKIES_PATH=${TS_YT_COOKIES_PATH:-/run/secrets/yt_cookies}
-      # Telegram environment variables
-      - TG_BOT_TOKEN=
-      - TG_CHAT_IDS= # comma-separated, one or more
-      - TG_FAVORITES_FOLDER=/opt/sounds/favorites
     secrets:
       - yt_cookies
     volumes:
       - ./teamspeak-client:/opt/soundbot/teamspeak-client:ro
       - ./sounds:/opt/soundbot/sounds
-      - ./favorites:/opt/soundbot/favorites
       - soundbot-ts-profile:/home/appuser
     ports:
       # VNC - only needed for the initial manual setup (and occasional debugging).

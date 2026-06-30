@@ -122,7 +122,6 @@ Telegram-related runs at all.
 ```yaml
 - TG_BOT_TOKEN=<your token>
 - TG_CHAT_IDS=123456789,-987654321   # comma-separated, one or more
-- TG_FAVORITES_FOLDER=favorites # folder for files containing user favorites sounds
 ```
 
 ### Usage
