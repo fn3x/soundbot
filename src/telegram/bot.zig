@@ -5,106 +5,60 @@ const queries = @import("queries.zig");
 const structs = @import("structs.zig");
 const queue_mod = @import("queue.zig");
 
-const Kind = enum { play, expand, page, refresh };
-
-const ParsedCallback = struct {
-    kind: Kind,
-    payload: []const u8,
-};
-
-fn parseCallbackData(data: []const u8) ?ParsedCallback {
-    const colon = std.mem.indexOfScalar(u8, data, ':') orelse return null;
-    const kind_str = data[0..colon];
-    const payload = data[colon + 1 ..];
-    if (std.mem.eql(u8, kind_str, "play")) return .{ .kind = .play, .payload = payload };
-    if (std.mem.eql(u8, kind_str, "expand")) return .{ .kind = .expand, .payload = payload };
-    if (std.mem.eql(u8, kind_str, "page")) return .{ .kind = .page, .payload = payload };
-    if (std.mem.eql(u8, kind_str, "refresh")) return .{ .kind = .refresh, .payload = payload };
-    return null;
-}
-
 const PAGE_SIZE = 10;
 
-fn buildTopLevelKeyboard(allocator: std.mem.Allocator, groups: []const sounds.SoundGroup, page: usize) !structs.InlineKeyboardMarkup {
-    const total_pages = (groups.len + PAGE_SIZE - 1) / PAGE_SIZE;
-    const safe_page = if (page >= total_pages and total_pages > 0) total_pages - 1 else page;
-    const start = safe_page * PAGE_SIZE;
-    const end = @min(start + PAGE_SIZE, groups.len);
-    const page_groups = groups[start..end];
+const family_prefix = "📁 ";
+const refresh_family_prefix = "🔄 Refresh ";
+const refresh_top_text = "🔄 Refresh";
+const back_text = "« Back";
+const close_text = "✖ Close";
+const prev_prefix = "‹ Page ";
+const next_prefix = "› Page ";
+const play_prefix = "!";
 
-    var rows: std.ArrayList([]const structs.InlineKeyboardButton) = .empty;
-    var current_row: std.ArrayList(structs.InlineKeyboardButton) = .empty;
+const Action = union(enum) {
+    play: []const u8,
+    expand_family: []const u8,
+    refresh_family: []const u8,
+    refresh_top,
+    back,
+    close,
+    goto_page: usize,
+    show_keyboard,
+};
 
-    for (page_groups) |group| {
-        const is_family = group.members.len > 0;
-        const text = if (is_family)
-            try std.fmt.allocPrint(allocator, "{s} ({d})", .{ group.key, group.members.len })
-        else
-            try std.fmt.allocPrint(allocator, "{s}", .{group.key});
+fn parseButtonText(text: []const u8) ?Action {
+    if (std.mem.eql(u8, text, close_text)) return .close;
+    if (std.mem.eql(u8, text, back_text)) return .back;
+    if (std.mem.eql(u8, text, refresh_top_text)) return .refresh_top;
+    if (std.mem.startsWith(u8, text, "/sounds")) return .show_keyboard;
 
-        const data = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ if (is_family) "expand" else "play", group.key });
-
-        try current_row.append(allocator, .{ .text = text, .callback_data = data });
-        if (current_row.items.len == 2) {
-            try rows.append(allocator, try current_row.toOwnedSlice(allocator));
-            current_row = .empty;
-        }
-    }
-    if (current_row.items.len > 0) {
-        try rows.append(allocator, try current_row.toOwnedSlice(allocator));
-    }
-
-    var nav_row: std.ArrayList(structs.InlineKeyboardButton) = .empty;
-    if (total_pages > 1) {
-        if (safe_page > 0) {
-            try nav_row.append(allocator, .{
-                .text = "‹ Prev",
-                .callback_data = try std.fmt.allocPrint(allocator, "page:{d}", .{safe_page - 1}),
-            });
-        }
-        try nav_row.append(allocator, .{
-            .text = try std.fmt.allocPrint(allocator, "{d}/{d}", .{ safe_page + 1, total_pages }),
-            .callback_data = try std.fmt.allocPrint(allocator, "page:{d}", .{safe_page}),
-        });
-        if (safe_page + 1 < total_pages) {
-            try nav_row.append(allocator, .{
-                .text = "Next ›",
-                .callback_data = try std.fmt.allocPrint(allocator, "page:{d}", .{safe_page + 1}),
-            });
-        }
-    }
-    try nav_row.append(allocator, .{
-        .text = "🔄",
-        .callback_data = try std.fmt.allocPrint(allocator, "refresh:{d}", .{safe_page}),
-    });
-    try rows.append(allocator, try nav_row.toOwnedSlice(allocator));
-
-    return .{ .inline_keyboard = try rows.toOwnedSlice(allocator) };
-}
-
-fn buildFamilyKeyboard(allocator: std.mem.Allocator, group: sounds.SoundGroup) !structs.InlineKeyboardMarkup {
-    var rows: std.ArrayList([]const structs.InlineKeyboardButton) = .empty;
-    var current_row: std.ArrayList(structs.InlineKeyboardButton) = .empty;
-
-    for (group.members) |member| {
-        const text = try std.fmt.allocPrint(allocator, "{s}", .{member});
-        const data = try std.fmt.allocPrint(allocator, "play:{s}", .{member});
-        try current_row.append(allocator, .{ .text = text, .callback_data = data });
-        if (current_row.items.len == 2) {
-            try rows.append(allocator, try current_row.toOwnedSlice(allocator));
-            current_row = .empty;
-        }
-    }
-    if (current_row.items.len > 0) {
-        try rows.append(allocator, try current_row.toOwnedSlice(allocator));
+    if (std.mem.startsWith(u8, text, refresh_family_prefix)) {
+        return .{ .refresh_family = text[refresh_family_prefix.len..] };
     }
 
-    const bottom_row = try allocator.alloc(structs.InlineKeyboardButton, 2);
-    bottom_row[0] = .{ .text = "🔄 Refresh", .callback_data = try std.fmt.allocPrint(allocator, "expand:{s}", .{group.key}) };
-    bottom_row[1] = .{ .text = "« Back", .callback_data = "page:0" };
-    try rows.append(allocator, bottom_row);
+    if (std.mem.startsWith(u8, text, family_prefix)) {
+        const rest = text[family_prefix.len..];
+        const key_end = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
+        return .{ .expand_family = rest[0..key_end] };
+    }
 
-    return .{ .inline_keyboard = try rows.toOwnedSlice(allocator) };
+    if (std.mem.startsWith(u8, text, prev_prefix)) {
+        const n = std.fmt.parseInt(usize, text[prev_prefix.len..], 10) catch return null;
+        if (n == 0) return null;
+        return .{ .goto_page = n - 1 };
+    }
+    if (std.mem.startsWith(u8, text, next_prefix)) {
+        const n = std.fmt.parseInt(usize, text[next_prefix.len..], 10) catch return null;
+        if (n == 0) return null;
+        return .{ .goto_page = n - 1 };
+    }
+
+    if (std.mem.startsWith(u8, text, play_prefix)) {
+        return .{ .play = text[play_prefix.len..] };
+    }
+
+    return null;
 }
 
 fn findGroup(groups: []const sounds.SoundGroup, key: []const u8) ?sounds.SoundGroup {
@@ -114,35 +68,162 @@ fn findGroup(groups: []const sounds.SoundGroup, key: []const u8) ?sounds.SoundGr
     return null;
 }
 
-fn isAllowedChat(chat_ids: []const i64, chat_id: i64) bool {
-    for (chat_ids) |id| {
-        if (id == chat_id) return true;
+fn buildTopLevelKeyboard(allocator: std.mem.Allocator, groups: []const sounds.SoundGroup, page: usize) !struct { markup: structs.ReplyKeyboardMarkup, total_pages: usize, safe_page: usize } {
+    const total_pages = @max(1, (groups.len + PAGE_SIZE - 1) / PAGE_SIZE);
+    const safe_page = if (page >= total_pages) total_pages - 1 else page;
+    const start = safe_page * PAGE_SIZE;
+    const end = @min(start + PAGE_SIZE, groups.len);
+    const page_groups = groups[start..end];
+
+    var rows: std.ArrayList([]const structs.KeyboardButton) = .empty;
+    var current_row: std.ArrayList(structs.KeyboardButton) = .empty;
+
+    for (page_groups) |group| {
+        const is_family = group.members.len > 0;
+        const text = if (is_family)
+            try std.fmt.allocPrint(allocator, "{s}{s} ({d})", .{ family_prefix, group.key, group.members.len })
+        else
+            try std.fmt.allocPrint(allocator, "{s}{s}", .{ play_prefix, group.key });
+
+        try current_row.append(allocator, .{ .text = text });
+        if (current_row.items.len == 2) {
+            try rows.append(allocator, try current_row.toOwnedSlice(allocator));
+            current_row = .empty;
+        }
     }
-    return false;
+    if (current_row.items.len > 0) {
+        try rows.append(allocator, try current_row.toOwnedSlice(allocator));
+    }
+
+    var nav_row: std.ArrayList(structs.KeyboardButton) = .empty;
+    if (total_pages > 1) {
+        if (safe_page > 0) {
+            try nav_row.append(allocator, .{ .text = try std.fmt.allocPrint(allocator, "{s}{d}", .{ prev_prefix, safe_page }) });
+        }
+        if (safe_page + 1 < total_pages) {
+            try nav_row.append(allocator, .{ .text = try std.fmt.allocPrint(allocator, "{s}{d}", .{ next_prefix, safe_page + 2 }) });
+        }
+    }
+    if (nav_row.items.len > 0) {
+        try rows.append(allocator, try nav_row.toOwnedSlice(allocator));
+    }
+
+    const bottom_row = try allocator.alloc(structs.KeyboardButton, 2);
+    bottom_row[0] = .{ .text = refresh_top_text };
+    bottom_row[1] = .{ .text = close_text };
+    try rows.append(allocator, bottom_row);
+
+    return .{
+        .markup = .{ .keyboard = try rows.toOwnedSlice(allocator) },
+        .total_pages = total_pages,
+        .safe_page = safe_page,
+    };
 }
 
-pub fn sendKeyboard(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.TgClient, chat_id: i64, sounds_dir: []const u8) void {
+fn buildFamilyKeyboard(allocator: std.mem.Allocator, group: sounds.SoundGroup) !structs.ReplyKeyboardMarkup {
+    var rows: std.ArrayList([]const structs.KeyboardButton) = .empty;
+    var current_row: std.ArrayList(structs.KeyboardButton) = .empty;
+
+    for (group.members) |member| {
+        const text = try std.fmt.allocPrint(allocator, "{s}{s}", .{ play_prefix, member });
+        try current_row.append(allocator, .{ .text = text });
+        if (current_row.items.len == 2) {
+            try rows.append(allocator, try current_row.toOwnedSlice(allocator));
+            current_row = .empty;
+        }
+    }
+    if (current_row.items.len > 0) {
+        try rows.append(allocator, try current_row.toOwnedSlice(allocator));
+    }
+
+    const bottom_row = try allocator.alloc(structs.KeyboardButton, 3);
+    bottom_row[0] = .{ .text = try std.fmt.allocPrint(allocator, "{s}{s}", .{ refresh_family_prefix, group.key }) };
+    bottom_row[1] = .{ .text = back_text };
+    bottom_row[2] = .{ .text = close_text };
+    try rows.append(allocator, bottom_row);
+
+    return .{ .keyboard = try rows.toOwnedSlice(allocator) };
+}
+
+fn sendTopLevel(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.TgClient, chat_id: i64, sounds_dir: []const u8, page: usize) void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
     var groups = sounds.buildSoundGroups(allocator, io, sounds_dir) catch |err| {
-        std.debug.print("[telegram] failed to build sound groups for /sounds: {}\n", .{err});
+        std.debug.print("[telegram] failed to build sound groups: {}\n", .{err});
         return;
     };
     defer groups.deinit(allocator);
 
-    const keyboard = buildTopLevelKeyboard(arena, groups.groups, 0) catch |err| {
-        std.debug.print("[telegram] failed to build keyboard: {}\n", .{err});
+    const built = buildTopLevelKeyboard(arena, groups.groups, page) catch |err| {
+        std.debug.print("[telegram] failed to build top-level keyboard: {}\n", .{err});
         return;
     };
-    _ = tg_client.sendMessage(arena, .{
+
+    const text = if (built.total_pages > 1)
+        std.fmt.allocPrint(arena, "Tap a sound to play it: (page {d}/{d})", .{ built.safe_page + 1, built.total_pages }) catch "Tap a sound to play it:"
+    else
+        "Tap a sound to play it:";
+
+    _ = tg_client.sendMessage(arena, structs.SendMessageParams{
         .chat_id = chat_id,
-        .text = "Tap a sound to play it:",
+        .text = text,
+        .reply_markup = built.markup,
+    }) catch |err| {
+        std.debug.print("[telegram] failed to send top-level keyboard: {}\n", .{err});
+    };
+}
+
+fn sendFamily(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.TgClient, chat_id: i64, sounds_dir: []const u8, key: []const u8) void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var groups = sounds.buildSoundGroups(allocator, io, sounds_dir) catch |err| {
+        std.debug.print("[telegram] failed to rebuild sound groups for family view: {}\n", .{err});
+        return;
+    };
+    defer groups.deinit(allocator);
+
+    const group = findGroup(groups.groups, key) orelse {
+        sendTopLevel(allocator, io, tg_client, chat_id, sounds_dir, 0);
+        return;
+    };
+
+    const keyboard = buildFamilyKeyboard(arena, group) catch |err| {
+        std.debug.print("[telegram] failed to build family keyboard: {}\n", .{err});
+        return;
+    };
+
+    const text = std.fmt.allocPrint(arena, "{s} sounds:", .{key}) catch "Sounds:";
+    _ = tg_client.sendMessage(arena, structs.SendMessageParams{
+        .chat_id = chat_id,
+        .text = text,
         .reply_markup = keyboard,
     }) catch |err| {
-        std.debug.print("[telegram] failed to send keyboard: {}\n", .{err});
+        std.debug.print("[telegram] failed to send family keyboard: {}\n", .{err});
     };
+}
+
+fn sendClose(allocator: std.mem.Allocator, tg_client: *queries.TgClient, chat_id: i64) void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    _ = tg_client.sendMessage(arena, structs.SendMessageRemoveKeyboardParams{
+        .chat_id = chat_id,
+        .text = "Keyboard closed. Send /sounds to bring it back.",
+    }) catch |err| {
+        std.debug.print("[telegram] failed to send keyboard-close message: {}\n", .{err});
+    };
+}
+
+fn isAllowedChat(chat_ids: []const i64, chat_id: i64) bool {
+    for (chat_ids) |id| {
+        if (id == chat_id) return true;
+    }
+    return false;
 }
 
 pub fn consumeButtonPresses(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, button_queue: *queue_mod.ButtonQueue, sounds_dir: []const u8) !void {
@@ -188,76 +269,26 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
         for (updates) |update| {
             offset = update.update_id + 1;
 
-            if (update.message) |msg| {
-                if (!isAllowedChat(chat_ids, msg.chat.id)) {
-                    std.debug.print("[telegram] ignoring message from unauthorized chat {d}\n", .{msg.chat.id});
-                    continue;
-                }
-                const text = msg.text orelse continue;
-                if (std.mem.startsWith(u8, text, "/sounds")) {
-                    sendKeyboard(allocator, io, tg_client, msg.chat.id, sounds_dir);
-                }
+            const msg = update.message orelse continue;
+            if (!isAllowedChat(chat_ids, msg.chat.id)) {
+                std.debug.print("[telegram] ignoring message from unauthorized chat {d}\n", .{msg.chat.id});
                 continue;
             }
+            const text = msg.text orelse continue;
+            const action = parseButtonText(text) orelse continue;
 
-            const cq = update.callback_query orelse continue;
-            const message = cq.message orelse continue;
-
-            if (!isAllowedChat(chat_ids, message.chat.id)) {
-                std.debug.print("[telegram] ignoring button press from unauthorized chat {d}\n", .{message.chat.id});
-                continue;
-            }
-
-            const data = cq.data orelse continue;
-            const parsed = parseCallbackData(data) orelse continue;
-
-            switch (parsed.kind) {
-                .play => {
-                    button_queue.push(allocator, io, parsed.payload) catch |err| {
+            switch (action) {
+                .show_keyboard => sendTopLevel(allocator, io, tg_client, msg.chat.id, sounds_dir, 0),
+                .refresh_top => sendTopLevel(allocator, io, tg_client, msg.chat.id, sounds_dir, 0),
+                .goto_page => |page| sendTopLevel(allocator, io, tg_client, msg.chat.id, sounds_dir, page),
+                .back => sendTopLevel(allocator, io, tg_client, msg.chat.id, sounds_dir, 0),
+                .expand_family => |key| sendFamily(allocator, io, tg_client, msg.chat.id, sounds_dir, key),
+                .refresh_family => |key| sendFamily(allocator, io, tg_client, msg.chat.id, sounds_dir, key),
+                .close => sendClose(allocator, tg_client, msg.chat.id),
+                .play => |name| {
+                    button_queue.push(allocator, io, name) catch |err| {
                         std.debug.print("[telegram] failed to queue button press: {}\n", .{err});
                     };
-                    tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id, .text = "Playing..." });
-                },
-                .expand => {
-                    const groups = sounds.buildSoundGroups(arena, io, sounds_dir) catch |err| {
-                        std.debug.print("[telegram] failed to rebuild sound groups for expand: {}\n", .{err});
-                        tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
-                        continue;
-                    };
-                    const group = findGroup(groups.groups, parsed.payload) orelse {
-                        tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
-                        continue;
-                    };
-                    const keyboard = buildFamilyKeyboard(arena, group) catch |err| {
-                        std.debug.print("[telegram] failed to build family keyboard: {}\n", .{err});
-                        tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
-                        continue;
-                    };
-                    tg_client.editMessageReplyMarkup(arena, .{
-                        .chat_id = message.chat.id,
-                        .message_id = message.message_id,
-                        .reply_markup = keyboard,
-                    });
-                    tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
-                },
-                .page, .refresh => {
-                    const target_page = std.fmt.parseInt(usize, parsed.payload, 10) catch 0;
-                    const groups = sounds.buildSoundGroups(arena, io, sounds_dir) catch |err| {
-                        std.debug.print("[telegram] failed to rebuild sound groups for page/refresh: {}\n", .{err});
-                        tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
-                        continue;
-                    };
-                    const keyboard = buildTopLevelKeyboard(arena, groups.groups, target_page) catch |err| {
-                        std.debug.print("[telegram] failed to build top-level keyboard: {}\n", .{err});
-                        tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
-                        continue;
-                    };
-                    tg_client.editMessageReplyMarkup(arena, .{
-                        .chat_id = message.chat.id,
-                        .message_id = message.message_id,
-                        .reply_markup = keyboard,
-                    });
-                    tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
                 },
             }
         }
