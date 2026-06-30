@@ -23,6 +23,34 @@ fn parseCallbackData(data: []const u8) ?ParsedCallback {
     return null;
 }
 
+const MAX_TRACKED_KEYBOARDS = 200;
+
+const MessageOwners = struct {
+    owners: std.AutoHashMap(i64, i64),
+    order: std.ArrayList(i64),
+
+    fn init(allocator: std.mem.Allocator) MessageOwners {
+        return .{ .owners = std.AutoHashMap(i64, i64).init(allocator), .order = .empty };
+    }
+
+    fn record(self: *MessageOwners, allocator: std.mem.Allocator, message_id: i64, user_id: i64) void {
+        self.owners.put(message_id, user_id) catch |err| {
+            std.debug.print("[telegram] failed to record keyboard owner: {}\n", .{err});
+            return;
+        };
+        self.order.append(allocator, message_id) catch {};
+
+        if (self.order.items.len > MAX_TRACKED_KEYBOARDS) {
+            const oldest = self.order.orderedRemove(0);
+            _ = self.owners.remove(oldest);
+        }
+    }
+
+    fn ownerOf(self: *const MessageOwners, message_id: i64) ?i64 {
+        return self.owners.get(message_id);
+    }
+};
+
 const PAGE_SIZE = 10;
 
 fn buildTopLevelKeyboard(allocator: std.mem.Allocator, groups: []const sounds.SoundGroup, page: usize) !structs.InlineKeyboardMarkup {
@@ -121,7 +149,7 @@ fn isAllowedChat(chat_ids: []const i64, chat_id: i64) bool {
     return false;
 }
 
-pub fn sendKeyboard(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.TgClient, chat_id: i64, sounds_dir: []const u8) void {
+pub fn sendKeyboard(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.TgClient, chat_id: i64, owner_user_id: ?i64, owners: *MessageOwners, sounds_dir: []const u8) void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -136,13 +164,17 @@ pub fn sendKeyboard(allocator: std.mem.Allocator, io: std.Io, tg_client: *querie
         std.debug.print("[telegram] failed to build keyboard: {}\n", .{err});
         return;
     };
-    _ = tg_client.sendMessage(arena, .{
+    const sent = tg_client.sendMessage(arena, .{
         .chat_id = chat_id,
         .text = "Tap a sound to play it:",
         .reply_markup = keyboard,
     }) catch |err| {
         std.debug.print("[telegram] failed to send keyboard: {}\n", .{err});
+        return;
     };
+    if (owner_user_id) |uid| {
+        owners.record(allocator, sent.message_id, uid);
+    }
 }
 
 pub fn consumeButtonPresses(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, button_queue: *queue_mod.ButtonQueue, sounds_dir: []const u8) !void {
@@ -173,6 +205,7 @@ pub fn consumeButtonPresses(allocator: std.mem.Allocator, io: std.Io, rand: std.
 
 pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.TgClient, chat_ids: []const i64, sounds_dir: []const u8, button_queue: *queue_mod.ButtonQueue) !void {
     var offset: ?i64 = null;
+    var owners = MessageOwners.init(allocator);
 
     while (true) {
         var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -195,7 +228,8 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
                 }
                 const text = msg.text orelse continue;
                 if (std.mem.startsWith(u8, text, "/sounds")) {
-                    sendKeyboard(allocator, io, tg_client, msg.chat.id, sounds_dir);
+                    const owner_user_id: ?i64 = if (msg.from) |sender| sender.id else null;
+                    sendKeyboard(allocator, io, tg_client, msg.chat.id, owner_user_id, &owners, sounds_dir);
                 }
                 continue;
             }
@@ -210,6 +244,18 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
 
             const data = cq.data orelse continue;
             const parsed = parseCallbackData(data) orelse continue;
+
+            if (owners.ownerOf(message.message_id)) |owner_id| {
+                if (owner_id != cq.from.id) {
+                    std.debug.print("[telegram] rejecting button press from user {d} on a keyboard owned by {d}\n", .{ cq.from.id, owner_id });
+                    tg_client.answerCallbackQuery(arena, .{
+                        .callback_query_id = cq.id,
+                        .text = "This isn't your keyboard - send /sounds to get your own.",
+                        .show_alert = true,
+                    });
+                    continue;
+                }
+            }
 
             switch (parsed.kind) {
                 .play => {
