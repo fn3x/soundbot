@@ -328,7 +328,9 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
                         .message_id = message.message_id,
                         .reply_markup = keyboard,
                     });
-                    tg_client.answerCallbackQuery(arena, .{ .text = parsed.payload, .callback_query_id = cq.id });
+
+                    const page_text = std.fmt.allocPrint(allocator, "Page {d}", .{target_page + 1}) catch "";
+                    tg_client.answerCallbackQuery(arena, .{ .text = page_text, .callback_query_id = cq.id });
                 },
                 .refresh => {
                     const target_page = std.fmt.parseInt(usize, parsed.payload, 10) catch 0;
