@@ -260,7 +260,7 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
                     std.debug.print("[telegram] rejecting button press from user {d} on a keyboard owned by {d}\n", .{ cq.from.id, owner_id });
                     tg_client.answerCallbackQuery(arena, .{
                         .callback_query_id = cq.id,
-                        .text = "This isn't your keyboard - send /sounds to get your own.",
+                        .text = "This isn't your keyboard, you thief! Send /sounds to get your own.",
                         .show_alert = true,
                     });
                     continue;
@@ -278,7 +278,7 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
                     if (cached_groups == null) {
                         cached_groups = sounds.buildSoundGroups(allocator, io, sounds_dir) catch |err| {
                             std.debug.print("[telegram] failed to build sound groups for expand: {}\n", .{err});
-                            tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
+                            tg_client.answerCallbackQuery(arena, .{ .text = "Error", .callback_query_id = cq.id });
                             continue;
                         };
                     }
@@ -307,20 +307,20 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
                         .message_id = message.message_id,
                         .reply_markup = keyboard,
                     });
-                    tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
+                    tg_client.answerCallbackQuery(arena, .{ .text = key, .callback_query_id = cq.id });
                 },
                 .page => {
                     const target_page = std.fmt.parseInt(usize, parsed.payload, 10) catch 0;
                     if (cached_groups == null) {
                         cached_groups = sounds.buildSoundGroups(allocator, io, sounds_dir) catch |err| {
                             std.debug.print("[telegram] failed to build sound groups for page: {}\n", .{err});
-                            tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
+                            tg_client.answerCallbackQuery(arena, .{ .text = "Error", .callback_query_id = cq.id });
                             continue;
                         };
                     }
                     const keyboard = buildTopLevelKeyboard(arena, cached_groups.?.groups, target_page) catch |err| {
                         std.debug.print("[telegram] failed to build top-level keyboard: {}\n", .{err});
-                        tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
+                        tg_client.answerCallbackQuery(arena, .{ .text = "Error", .callback_query_id = cq.id });
                         continue;
                     };
                     tg_client.editMessageReplyMarkup(arena, .{
@@ -328,7 +328,7 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
                         .message_id = message.message_id,
                         .reply_markup = keyboard,
                     });
-                    tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
+                    tg_client.answerCallbackQuery(arena, .{ .text = parsed.payload, .callback_query_id = cq.id });
                 },
                 .refresh => {
                     const target_page = std.fmt.parseInt(usize, parsed.payload, 10) catch 0;
@@ -348,7 +348,7 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
                         .message_id = message.message_id,
                         .reply_markup = keyboard,
                     });
-                    tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
+                    tg_client.answerCallbackQuery(arena, .{ .text = "Refreshed", .callback_query_id = cq.id });
                 },
             }
         }
