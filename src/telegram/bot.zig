@@ -135,7 +135,7 @@ fn buildFamilyKeyboard(allocator: std.mem.Allocator, group: sounds.SoundGroup, r
     }
 
     const bottom_row = try allocator.alloc(structs.InlineKeyboardButton, 2);
-    bottom_row[0] = .{ .text = "🔄 Refresh", .callback_data = try std.fmt.allocPrint(allocator, "expand:{s}:{s}", .{ group.key, return_page }) };
+    bottom_row[0] = .{ .text = "🔄 Refresh", .callback_data = try std.fmt.allocPrint(allocator, "expand:{s}:{d}", .{ group.key, return_page }) };
     bottom_row[1] = .{ .text = "« Back", .callback_data = try std.fmt.allocPrint(allocator, "page:{d}", .{return_page}) };
     try rows.append(allocator, bottom_row);
 
