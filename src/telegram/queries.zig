@@ -77,9 +77,40 @@ pub const TgClient = struct {
     }
 
     pub fn editMessageReplyMarkup(self: *Self, allocator: std.mem.Allocator, params: structs.EditMessageReplyMarkupParams) void {
-        _ = self.post(std.json.Value, allocator, "editMessageReplyMarkup", params) catch |err| {
+        const body = std.json.Stringify.valueAlloc(allocator, params, .{}) catch return;
+        const url = std.fmt.allocPrint(allocator, "https://api.telegram.org/bot{s}/editMessageReplyMarkup", .{self.token}) catch return;
+
+        var response_buf: std.Io.Writer.Allocating = .init(allocator);
+        defer response_buf.deinit();
+
+        _ = self.http_client.fetch(.{
+            .location = .{ .url = url },
+            .method = .POST,
+            .payload = body,
+            .headers = .{ .content_type = .{ .override = "application/json" } },
+            .response_writer = &response_buf.writer,
+        }) catch |err| {
             std.debug.print("[telegram] editMessageReplyMarkup failed: {}\n", .{err});
+            return;
         };
+
+        const envelope = std.json.parseFromSliceLeaky(
+            Envelope(std.json.Value),
+            allocator,
+            response_buf.written(),
+            .{ .ignore_unknown_fields = true },
+        ) catch return;
+
+        if (!envelope.ok) {
+            if (envelope.error_code) |code| {
+                if (code == 400) {
+                    if (envelope.description) |desc| {
+                        if (std.mem.indexOf(u8, desc, "message is not modified") != null) return;
+                    }
+                }
+            }
+            std.debug.print("[telegram] editMessageReplyMarkup failed: {?d} {?s}\n", .{ envelope.error_code, envelope.description });
+        }
     }
 
     pub fn answerCallbackQuery(self: *Self, allocator: std.mem.Allocator, params: structs.AnswerCallbackQueryParams) void {
