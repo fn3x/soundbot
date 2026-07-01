@@ -71,7 +71,13 @@ fn buildTopLevelKeyboard(allocator: std.mem.Allocator, groups: []const sounds.So
         else
             try std.fmt.allocPrint(allocator, "{s}", .{group.key});
 
-        const data = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ if (is_family) "expand" else "play", group.key });
+        var data: []u8 = undefined;
+
+        if (is_family) {
+            data = try std.fmt.allocPrint(allocator, "{s}:{s}:{d}", .{ "expand", group.key, page });
+        } else {
+            data = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ "play", group.key });
+        }
 
         try current_row.append(allocator, .{ .text = text, .callback_data = data });
         if (current_row.items.len == COLUMNS_SIZE) {
@@ -111,7 +117,7 @@ fn buildTopLevelKeyboard(allocator: std.mem.Allocator, groups: []const sounds.So
     return .{ .inline_keyboard = try rows.toOwnedSlice(allocator) };
 }
 
-fn buildFamilyKeyboard(allocator: std.mem.Allocator, group: sounds.SoundGroup) !structs.InlineKeyboardMarkup {
+fn buildFamilyKeyboard(allocator: std.mem.Allocator, group: sounds.SoundGroup, return_page: usize) !structs.InlineKeyboardMarkup {
     var rows: std.ArrayList([]const structs.InlineKeyboardButton) = .empty;
     var current_row: std.ArrayList(structs.InlineKeyboardButton) = .empty;
 
@@ -130,7 +136,7 @@ fn buildFamilyKeyboard(allocator: std.mem.Allocator, group: sounds.SoundGroup) !
 
     const bottom_row = try allocator.alloc(structs.InlineKeyboardButton, 2);
     bottom_row[0] = .{ .text = "🔄 Refresh", .callback_data = try std.fmt.allocPrint(allocator, "expand:{s}", .{group.key}) };
-    bottom_row[1] = .{ .text = "« Back", .callback_data = "page:0" };
+    bottom_row[1] = .{ .text = "« Back", .callback_data = try std.fmt.allocPrint(allocator, "page:{d}", .{return_page}) };
     try rows.append(allocator, bottom_row);
 
     return .{ .inline_keyboard = try rows.toOwnedSlice(allocator) };
@@ -276,13 +282,24 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
                             continue;
                         };
                     }
-                    const group = findGroup(cached_groups.?.groups, parsed.payload) orelse {
-                        tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
+
+                    const colon = std.mem.indexOfScalar(u8, parsed.payload, ':') orelse {
+                        std.debug.print("[telegram] failed to parse payload on expand: no colon found\n", .{});
+                        tg_client.answerCallbackQuery(arena, .{ .text = "Wrong encoded button", .callback_query_id = cq.id });
                         continue;
                     };
-                    const keyboard = buildFamilyKeyboard(arena, group) catch |err| {
+                    const key = parsed.payload[0..colon];
+                    const page_str = parsed.payload[colon + 1 ..];
+                    const return_page: usize = std.fmt.parseInt(usize, page_str, 10) catch 0;
+
+                    const group = findGroup(cached_groups.?.groups, key) orelse {
+                        std.debug.print("[telegram] no sound family found for {s}\n", .{key});
+                        tg_client.answerCallbackQuery(arena, .{ .text = "No sound group found. Try 🔄 first", .callback_query_id = cq.id });
+                        continue;
+                    };
+                    const keyboard = buildFamilyKeyboard(arena, group, return_page) catch |err| {
                         std.debug.print("[telegram] failed to build family keyboard: {}\n", .{err});
-                        tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
+                        tg_client.answerCallbackQuery(arena, .{ .text = "Error", .callback_query_id = cq.id });
                         continue;
                     };
                     tg_client.editMessageReplyMarkup(arena, .{
