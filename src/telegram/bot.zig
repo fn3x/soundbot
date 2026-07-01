@@ -51,7 +51,8 @@ const MessageOwners = struct {
     }
 };
 
-const PAGE_SIZE = 10;
+const PAGE_SIZE = 36;
+const COLUMNS_SIZE = 6;
 
 fn buildTopLevelKeyboard(allocator: std.mem.Allocator, groups: []const sounds.SoundGroup, page: usize) !structs.InlineKeyboardMarkup {
     const total_pages = (groups.len + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -73,7 +74,7 @@ fn buildTopLevelKeyboard(allocator: std.mem.Allocator, groups: []const sounds.So
         const data = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ if (is_family) "expand" else "play", group.key });
 
         try current_row.append(allocator, .{ .text = text, .callback_data = data });
-        if (current_row.items.len == 2) {
+        if (current_row.items.len == COLUMNS_SIZE) {
             try rows.append(allocator, try current_row.toOwnedSlice(allocator));
             current_row = .empty;
         }
@@ -118,7 +119,7 @@ fn buildFamilyKeyboard(allocator: std.mem.Allocator, group: sounds.SoundGroup) !
         const text = try std.fmt.allocPrint(allocator, "{s}", .{member});
         const data = try std.fmt.allocPrint(allocator, "play:{s}", .{member});
         try current_row.append(allocator, .{ .text = text, .callback_data = data });
-        if (current_row.items.len == 2) {
+        if (current_row.items.len == COLUMNS_SIZE) {
             try rows.append(allocator, try current_row.toOwnedSlice(allocator));
             current_row = .empty;
         }
