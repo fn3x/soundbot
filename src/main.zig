@@ -45,10 +45,12 @@ const help_text =
 // session server-side that can cause the *next* launch to fail (stale session /
 // anti-flood heuristics tripping on a rapid reconnect from the same IP).
 
+var g_shutdown_requested = std.atomic.Value(bool).init(false);
+
 var g_ssh_stdin: ?std.Io.File = null;
 
 fn handleShutdownSignal(_: @TypeOf(std.posix.SIG.INT)) callconv(.c) void {
-    std.process.exit(0);
+    g_shutdown_requested.store(true, .release);
 }
 
 fn installShutdownHandler() !void {
@@ -139,19 +141,19 @@ pub fn main(init: std.process.Init) !void {
 
     if (cfg.tg_bot_token) |token| {
         const chat_ids = cfg.tg_chat_ids.?;
- 
+
         const tg_client = try allocator.create(tg_queries.TgClient);
         tg_client.* = tg_queries.TgClient.init(allocator, io, token);
- 
+
         const button_queue = try allocator.create(tg_queue.ButtonQueue);
         button_queue.* = tg_queue.ButtonQueue.init();
- 
+
         const tg_poll_thread = try std.Thread.spawn(.{}, tg_bot.pollLoop, .{ allocator, io, tg_client, chat_ids, cfg.sounds_dir, button_queue });
         tg_poll_thread.detach();
- 
+
         const tg_consume_thread = try std.Thread.spawn(.{}, tg_bot.consumeButtonPresses, .{ allocator, io, rand, button_queue, cfg.sounds_dir });
         tg_consume_thread.detach();
- 
+
         std.debug.print("[soundbot] Telegram bot active for {d} chat(s)\n", .{chat_ids.len});
     }
 
@@ -218,6 +220,11 @@ pub fn main(init: std.process.Init) !void {
     keepalive_thread.detach();
 
     while (true) {
+        if (g_shutdown_requested.load(.acquire)) {
+            std.debug.print("[soundbot] shutdown requested, sending quit\n", .{});
+            break;
+        }
+
         const maybe_line = try line_reader.readLine(allocator);
         const line = maybe_line orelse break; // ssh connection closed
         defer allocator.free(line);
