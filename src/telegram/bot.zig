@@ -149,16 +149,10 @@ fn isAllowedChat(chat_ids: []const i64, chat_id: i64) bool {
     return false;
 }
 
-pub fn sendKeyboard(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.TgClient, chat_id: i64, owner_user_id: ?i64, owners: *MessageOwners, sounds_dir: []const u8) void {
+pub fn sendKeyboard(allocator: std.mem.Allocator, tg_client: *queries.TgClient, chat_id: i64, owner_user_id: ?i64, owners: *MessageOwners, groups: *const sounds.SoundGroups) void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-
-    var groups = sounds.buildSoundGroups(allocator, io, sounds_dir) catch |err| {
-        std.debug.print("[telegram] failed to build sound groups for /sounds: {}\n", .{err});
-        return;
-    };
-    defer groups.deinit(allocator);
 
     const keyboard = buildTopLevelKeyboard(arena, groups.groups, 0) catch |err| {
         std.debug.print("[telegram] failed to build keyboard: {}\n", .{err});
@@ -207,6 +201,9 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
     var offset: ?i64 = null;
     var owners = MessageOwners.init(allocator);
 
+    var cached_groups: ?sounds.SoundGroups = null;
+    defer if (cached_groups) |*g| g.deinit(allocator);
+
     while (true) {
         var arena_state = std.heap.ArenaAllocator.init(allocator);
         defer arena_state.deinit();
@@ -229,7 +226,13 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
                 const text = msg.text orelse continue;
                 if (std.mem.startsWith(u8, text, "/sounds")) {
                     const owner_user_id: ?i64 = if (msg.from) |sender| sender.id else null;
-                    sendKeyboard(allocator, io, tg_client, msg.chat.id, owner_user_id, &owners, sounds_dir);
+                    if (cached_groups == null) {
+                        cached_groups = sounds.buildSoundGroups(allocator, io, sounds_dir) catch |err| {
+                            std.debug.print("[telegram] failed to build sound groups for /sounds: {}\n", .{err});
+                            continue;
+                        };
+                    }
+                    sendKeyboard(allocator, tg_client, msg.chat.id, owner_user_id, &owners, &cached_groups.?);
                 }
                 continue;
             }
@@ -265,12 +268,14 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
                     tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id, .text = "Playing..." });
                 },
                 .expand => {
-                    const groups = sounds.buildSoundGroups(arena, io, sounds_dir) catch |err| {
-                        std.debug.print("[telegram] failed to rebuild sound groups for expand: {}\n", .{err});
-                        tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
-                        continue;
-                    };
-                    const group = findGroup(groups.groups, parsed.payload) orelse {
+                    if (cached_groups == null) {
+                        cached_groups = sounds.buildSoundGroups(allocator, io, sounds_dir) catch |err| {
+                            std.debug.print("[telegram] failed to build sound groups for expand: {}\n", .{err});
+                            tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
+                            continue;
+                        };
+                    }
+                    const group = findGroup(cached_groups.?.groups, parsed.payload) orelse {
                         tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
                         continue;
                     };
@@ -286,15 +291,37 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
                     });
                     tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
                 },
-                .page, .refresh => {
+                .page => {
                     const target_page = std.fmt.parseInt(usize, parsed.payload, 10) catch 0;
-                    const groups = sounds.buildSoundGroups(arena, io, sounds_dir) catch |err| {
-                        std.debug.print("[telegram] failed to rebuild sound groups for page/refresh: {}\n", .{err});
+                    if (cached_groups == null) {
+                        cached_groups = sounds.buildSoundGroups(allocator, io, sounds_dir) catch |err| {
+                            std.debug.print("[telegram] failed to build sound groups for page: {}\n", .{err});
+                            tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
+                            continue;
+                        };
+                    }
+                    const keyboard = buildTopLevelKeyboard(arena, cached_groups.?.groups, target_page) catch |err| {
+                        std.debug.print("[telegram] failed to build top-level keyboard: {}\n", .{err});
                         tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
                         continue;
                     };
-                    const keyboard = buildTopLevelKeyboard(arena, groups.groups, target_page) catch |err| {
-                        std.debug.print("[telegram] failed to build top-level keyboard: {}\n", .{err});
+                    tg_client.editMessageReplyMarkup(arena, .{
+                        .chat_id = message.chat.id,
+                        .message_id = message.message_id,
+                        .reply_markup = keyboard,
+                    });
+                    tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
+                },
+                .refresh => {
+                    const target_page = std.fmt.parseInt(usize, parsed.payload, 10) catch 0;
+                    if (cached_groups) |*g| g.deinit(allocator);
+                    cached_groups = sounds.buildSoundGroups(allocator, io, sounds_dir) catch |err| {
+                        std.debug.print("[telegram] failed to rebuild sound groups on refresh: {}\n", .{err});
+                        tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
+                        continue;
+                    };
+                    const keyboard = buildTopLevelKeyboard(arena, cached_groups.?.groups, target_page) catch |err| {
+                        std.debug.print("[telegram] failed to build top-level keyboard on refresh: {}\n", .{err});
                         tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
                         continue;
                     };
