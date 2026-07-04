@@ -14,11 +14,11 @@ RUN curl -L -o /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-li
 
 WORKDIR /src
 COPY build.zig ./
+COPY build.zig.zon ./
 COPY src ./src
 
-# musl target = fully static binary, no glibc-version or dynamic-linker-path
-# dependency on whatever runs the final image.
-RUN /opt/zig/zig build --fetch -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSafe
+RUN /opt/zig/zig build --fetch
+RUN /opt/zig/zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSafe
 
 # ---- Stage 2: runtime ----
 FROM debian:bookworm-slim
