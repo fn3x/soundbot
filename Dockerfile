@@ -18,7 +18,7 @@ COPY src ./src
 
 # musl target = fully static binary, no glibc-version or dynamic-linker-path
 # dependency on whatever runs the final image.
-RUN /opt/zig/zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSafe
+RUN /opt/zig/zig build --fetch -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSafe
 
 # ---- Stage 2: runtime ----
 FROM debian:bookworm-slim
