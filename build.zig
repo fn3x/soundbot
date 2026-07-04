@@ -14,6 +14,13 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    const zound = b.dependency("zound", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("zound");
+
+    exe.root_module.addImport("zound", zound);
+
     b.installArtifact(exe);
     const run_exe = b.addRunArtifact(exe);
 

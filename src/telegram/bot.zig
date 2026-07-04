@@ -1,6 +1,8 @@
 const std = @import("std");
-const sounds = @import("../sounds.zig");
-const playback = @import("../playback.zig");
+
+const Sounds = @import("zound").Sounds;
+const Playback = @import("zound").Playback;
+
 const queries = @import("queries.zig");
 const structs = @import("structs.zig");
 const queue_mod = @import("queue.zig");
@@ -54,7 +56,7 @@ const MessageOwners = struct {
 const PAGE_SIZE = 36;
 const COLUMNS_SIZE = 6;
 
-fn buildTopLevelKeyboard(allocator: std.mem.Allocator, groups: []const sounds.SoundGroup, page: usize) !structs.InlineKeyboardMarkup {
+fn buildTopLevelKeyboard(allocator: std.mem.Allocator, groups: []const Sounds.SoundGroup, page: usize) !structs.InlineKeyboardMarkup {
     const total_pages = (groups.len + PAGE_SIZE - 1) / PAGE_SIZE;
     const safe_page = if (page >= total_pages and total_pages > 0) total_pages - 1 else page;
     const start = safe_page * PAGE_SIZE;
@@ -117,7 +119,7 @@ fn buildTopLevelKeyboard(allocator: std.mem.Allocator, groups: []const sounds.So
     return .{ .inline_keyboard = try rows.toOwnedSlice(allocator) };
 }
 
-fn buildFamilyKeyboard(allocator: std.mem.Allocator, group: sounds.SoundGroup, return_page: usize) !structs.InlineKeyboardMarkup {
+fn buildFamilyKeyboard(allocator: std.mem.Allocator, group: Sounds.SoundGroup, return_page: usize) !structs.InlineKeyboardMarkup {
     var rows: std.ArrayList([]const structs.InlineKeyboardButton) = .empty;
     var current_row: std.ArrayList(structs.InlineKeyboardButton) = .empty;
 
@@ -142,7 +144,7 @@ fn buildFamilyKeyboard(allocator: std.mem.Allocator, group: sounds.SoundGroup, r
     return .{ .inline_keyboard = try rows.toOwnedSlice(allocator) };
 }
 
-fn findGroup(groups: []const sounds.SoundGroup, key: []const u8) ?sounds.SoundGroup {
+fn findGroup(groups: []const Sounds.SoundGroup, key: []const u8) ?Sounds.SoundGroup {
     for (groups) |g| {
         if (std.mem.eql(u8, g.key, key)) return g;
     }
@@ -156,7 +158,7 @@ fn isAllowedChat(chat_ids: []const i64, chat_id: i64) bool {
     return false;
 }
 
-pub fn sendKeyboard(allocator: std.mem.Allocator, tg_client: *queries.TgClient, chat_id: i64, owner_user_id: ?i64, owners: *MessageOwners, groups: *const sounds.SoundGroups) void {
+pub fn sendKeyboard(allocator: std.mem.Allocator, tg_client: *queries.TgClient, chat_id: i64, owner_user_id: ?i64, owners: *MessageOwners, groups: *const Sounds.SoundGroups) void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -193,7 +195,7 @@ pub fn consumeButtonPresses(allocator: std.mem.Allocator, io: std.Io, rand: std.
 
         for (presses) |press| {
             defer allocator.free(press.data);
-            const found = playback.triggerSound(allocator, io, rand, sounds_dir, press.data) catch |err| {
+            const found = Playback.triggerSound(allocator, io, rand, sounds_dir, press.data) catch |err| {
                 std.debug.print("[telegram] failed to trigger '{s}': {}\n", .{ press.data, err });
                 continue;
             };
@@ -208,7 +210,7 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
     var offset: ?i64 = null;
     var owners = MessageOwners.init(allocator);
 
-    var cached_groups: ?sounds.SoundGroups = null;
+    var cached_groups: ?Sounds.SoundGroups = null;
     defer if (cached_groups) |*g| g.deinit(allocator);
 
     while (true) {
@@ -234,7 +236,7 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
                 if (std.mem.startsWith(u8, text, "/sounds")) {
                     const owner_user_id: ?i64 = if (msg.from) |sender| sender.id else null;
                     if (cached_groups == null) {
-                        cached_groups = sounds.buildSoundGroups(allocator, io, sounds_dir) catch |err| {
+                        cached_groups = Sounds.buildSoundGroups(allocator, io, sounds_dir) catch |err| {
                             std.debug.print("[telegram] failed to build sound groups for /sounds: {}\n", .{err});
                             continue;
                         };
@@ -276,7 +278,7 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
                 },
                 .expand => {
                     if (cached_groups == null) {
-                        cached_groups = sounds.buildSoundGroups(allocator, io, sounds_dir) catch |err| {
+                        cached_groups = Sounds.buildSoundGroups(allocator, io, sounds_dir) catch |err| {
                             std.debug.print("[telegram] failed to build sound groups for expand: {}\n", .{err});
                             tg_client.answerCallbackQuery(arena, .{ .text = "Error", .callback_query_id = cq.id });
                             continue;
@@ -312,7 +314,7 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
                 .page => {
                     const target_page = std.fmt.parseInt(usize, parsed.payload, 10) catch 0;
                     if (cached_groups == null) {
-                        cached_groups = sounds.buildSoundGroups(allocator, io, sounds_dir) catch |err| {
+                        cached_groups = Sounds.buildSoundGroups(allocator, io, sounds_dir) catch |err| {
                             std.debug.print("[telegram] failed to build sound groups for page: {}\n", .{err});
                             tg_client.answerCallbackQuery(arena, .{ .text = "Error", .callback_query_id = cq.id });
                             continue;
@@ -335,7 +337,7 @@ pub fn pollLoop(allocator: std.mem.Allocator, io: std.Io, tg_client: *queries.Tg
                 .refresh => {
                     const target_page = std.fmt.parseInt(usize, parsed.payload, 10) catch 0;
                     if (cached_groups) |*g| g.deinit(allocator);
-                    cached_groups = sounds.buildSoundGroups(allocator, io, sounds_dir) catch |err| {
+                    cached_groups = Sounds.buildSoundGroups(allocator, io, sounds_dir) catch |err| {
                         std.debug.print("[telegram] failed to rebuild sound groups on refresh: {}\n", .{err});
                         tg_client.answerCallbackQuery(arena, .{ .callback_query_id = cq.id });
                         continue;

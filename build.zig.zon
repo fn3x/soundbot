@@ -4,6 +4,10 @@
     .fingerprint = 0x2776da0a1a84b21c,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
+        .zound = .{
+            .url = "git+https://codeberg.org/fn3x/zound#d8a40afc6c05a399ee618fc6f32a9dff016c7005",
+            .hash = "zound-1.0.0-ngdG1yt0AABugmt1a7IBMaewvUExrFuWS91y43xO65S6",
+        },
     },
     .paths = .{
         "build.zig",

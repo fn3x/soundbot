@@ -1,11 +1,15 @@
 const std = @import("std");
+
 const config_mod = @import("config.zig");
 const ts_protocol = @import("ts_protocol.zig");
-const sounds = @import("sounds.zig");
 const query = @import("query.zig");
 const playback = @import("playback.zig");
-const tts = @import("tts.zig");
-const youtube = @import("youtube.zig");
+
+const Sounds = @import("zound").Sounds;
+const Playback = @import("zound").Playback;
+const TTS = @import("zound").TTS;
+const Youtube = @import("zound").YT;
+
 const tg_bot = @import("telegram/bot.zig");
 const tg_queries = @import("telegram/queries.zig");
 const tg_queue = @import("telegram/queue.zig");
@@ -64,9 +68,9 @@ fn installShutdownHandler() !void {
 }
 
 fn buildStatusText(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
-    const eff = playback.getEffectSettings(io);
-    const mas = playback.getMasterSettings(io);
-    const yt_len = youtube.getMaxSeconds(io);
+    const eff = try Playback.getEffectSettings(io);
+    const mas = try Playback.getMasterSettings(io);
+    const yt_len = try Youtube.getMaxSeconds(io);
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -96,8 +100,8 @@ fn buildStatusText(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
 }
 
 fn buildQueueText(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
-    const queue_names = try playback.getCurrentQueue(allocator, io);
-    defer playback.freeCurrentQueue(allocator, queue_names);
+    const queue_names = try Playback.getCurrentQueue(allocator, io);
+    defer Playback.freeCurrentQueue(allocator, queue_names);
 
     if (queue_names.len == 0) {
         return try allocator.dupe(u8, "Queue is empty.");
@@ -127,7 +131,9 @@ pub fn main(init: std.process.Init) !void {
     try installShutdownHandler();
 
     const cfg = try Config.load(allocator);
-    youtube.setCookiesPath(io, cfg.yt_cookies_path);
+    Youtube.setCookiesPath(io, cfg.yt_cookies_path) catch |err| {
+        std.debug.print("[soundbot] Failed to set youtube cookies path {}\n", .{err});
+    };
 
     const player_ctx = try allocator.create(playback.PlayerCtx);
     player_ctx.* = .{
@@ -262,7 +268,7 @@ pub fn main(init: std.process.Init) !void {
                 std.debug.print("[soundbot] yt: failed to allocate: {}\n", .{err});
                 continue;
             };
-            const thread = std.Thread.spawn(.{}, youtube.handleYtCommandThread, .{ allocator, io, rand, owned_query }) catch |err| {
+            const thread = std.Thread.spawn(.{}, handleYtCommandThread, .{ allocator, io, rand, owned_query }) catch |err| {
                 std.debug.print("[soundbot] failed to spawn yt download thread: {}\n", .{err});
                 allocator.free(owned_query);
                 continue;
@@ -271,13 +277,13 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
 
-        if (tts.findTtsVoice(name)) |voice_id| {
+        if (TTS.findTtsVoice(name)) |voice_id| {
             const text = std.mem.trim(u8, after_bang[name_end..], " \t");
             const owned_text = allocator.dupe(u8, text) catch |err| {
                 std.debug.print("[soundbot] tts: failed to allocate: {}\n", .{err});
                 continue;
             };
-            const thread = std.Thread.spawn(.{}, tts.handleTtsCommandThread, .{ allocator, io, rand, voice_id, null, owned_text }) catch |err| {
+            const thread = std.Thread.spawn(.{}, handleTtsCommandThread, .{ allocator, io, rand, voice_id, null, owned_text }) catch |err| {
                 std.debug.print("[soundbot] failed to spawn tts thread: {}\n", .{err});
                 allocator.free(owned_text);
                 continue;
@@ -288,12 +294,12 @@ pub fn main(init: std.process.Init) !void {
 
         if (std.mem.eql(u8, name, "tts")) {
             const text = std.mem.trim(u8, after_bang[name_end..], " \t");
-            const voice_id = tts.tts_voices[rand.intRangeLessThan(usize, 0, tts.tts_voices.len)].voice_id;
+            const voice_id = TTS.tts_voices[rand.intRangeLessThan(usize, 0, TTS.tts_voices.len)].voice_id;
             const owned_text = allocator.dupe(u8, text) catch |err| {
                 std.debug.print("[soundbot] tts: failed to allocate: {}\n", .{err});
                 continue;
             };
-            const thread = std.Thread.spawn(.{}, tts.handleTtsCommandThread, .{ allocator, io, rand, voice_id, null, owned_text }) catch |err| {
+            const thread = std.Thread.spawn(.{}, handleTtsCommandThread, .{ allocator, io, rand, voice_id, null, owned_text }) catch |err| {
                 std.debug.print("[soundbot] failed to spawn tts thread: {}\n", .{err});
                 allocator.free(owned_text);
                 continue;
@@ -320,21 +326,43 @@ pub fn main(init: std.process.Init) !void {
         }
 
         if (std.mem.eql(u8, name, "default")) {
-            playback.resetEffectSettings(io);
-            playback.resetMasterSettings(io, cfg.sink);
-            youtube.setMaxSeconds(io, 0);
+            Playback.resetEffectSettings(io) catch |err| {
+                std.debug.print("[soundbot] failed to reset effects settings: {}\n", .{err});
+                query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Error");
+                continue;
+            };
+            Playback.resetMasterSettings(io, cfg.sink) catch |err| {
+                std.debug.print("[soundbot] failed to reset master settings: {}\n", .{err});
+                query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Error");
+                continue;
+            };
+            Youtube.setMaxSeconds(io, 0) catch |err| {
+                std.debug.print("[soundbot] failed set youtube max seconds: {}\n", .{err});
+                query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Error");
+                continue;
+            };
             query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "All tunable settings reset to defaults.");
             continue;
         }
 
         if (std.mem.eql(u8, name, "stop")) {
-            playback.clearQueueAndStopCurrent(allocator, io);
+            Playback.clearQueueAndStopCurrent(allocator, io) catch |err| {
+                std.debug.print("[soundbot] failed to clear queue and stop current: {}\n", .{err});
+                query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Error");
+                continue;
+            };
             query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Queue cleared, playback stopped.");
             continue;
         }
 
         if (std.mem.eql(u8, name, "skip")) {
-            switch (playback.skipCurrent()) {
+            const skip_result = Playback.skipCurrent() catch |err| {
+                std.debug.print("[soundbot] failed to skip: {}\n", .{err});
+                query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Error");
+                continue;
+            };
+
+            switch (skip_result) {
                 .nothing => query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Nothing is currently playing or downloading to skip."),
                 .playback => query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Skipped - playing the next sound in queue."),
                 .download => query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Cancelled the in-progress download/synthesis."),
@@ -343,7 +371,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         if (std.mem.eql(u8, name, "current")) {
-            const current_name = playback.getCurrentName(allocator, io) catch |err| {
+            const current_name = Playback.getCurrentName(allocator, io) catch |err| {
                 std.debug.print("[soundbot] failed to get current name: {}\n", .{err});
                 continue;
             };
@@ -363,7 +391,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         if (std.mem.eql(u8, name, "sounds")) {
-            const list_msg = sounds.buildSoundsList(allocator, io, cfg.sounds_dir) catch |err| {
+            const list_msg = buildSoundsList(allocator, io, cfg.sounds_dir) catch |err| {
                 std.debug.print("[soundbot] failed to build sounds list: {}\n", .{err});
                 continue;
             };
@@ -379,7 +407,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         if (std.mem.eql(u8, name, "voices")) {
-            const list_msg = tts.buildVoicesList(allocator) catch |err| {
+            const list_msg = buildVoicesList(allocator) catch |err| {
                 std.debug.print("[soundbot] failed to build voices list: {}\n", .{err});
                 continue;
             };
@@ -404,7 +432,11 @@ pub fn main(init: std.process.Init) !void {
                 std.debug.print("[soundbot] !ytlength should be 0 (no cap) or 5-3600 seconds, got {d}\n", .{seconds});
                 continue;
             }
-            youtube.setMaxSeconds(io, seconds);
+            Youtube.setMaxSeconds(io, seconds) catch |err| {
+                std.debug.print("[soundbot] failed to set youtube max seconds: {}\n", .{err});
+                query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Error");
+                continue;
+            };
             if (seconds == 0) {
                 std.debug.print("[soundbot] yt length cap removed - full tracks will play\n", .{});
             } else {
@@ -425,7 +457,11 @@ pub fn main(init: std.process.Init) !void {
                 query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, ok_msg);
                 continue;
             }
-            playback.setEffectChance(io, percent);
+            Playback.setEffectChance(io, percent) catch |err| {
+                std.debug.print("[soundbot] failed to set effect chance: {}\n", .{err});
+                query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Error");
+                continue;
+            };
             var buf: [64]u8 = undefined;
             const err_msg = std.fmt.bufPrint(&buf, "Effect chance set to {d}%", .{percent}) catch "Effect chance updated";
             query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, err_msg);
@@ -444,7 +480,11 @@ pub fn main(init: std.process.Init) !void {
                 query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, ok_msg);
                 continue;
             }
-            playback.setEffectSlow(io, factor);
+            Playback.setEffectSlow(io, factor) catch |err| {
+                std.debug.print("[soundbot] failed to set slow effect value: {}\n", .{err});
+                query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Error");
+                continue;
+            };
             var buf: [64]u8 = undefined;
             const err_msg = std.fmt.bufPrint(&buf, "Slow+pitch-down factor set to {d}x", .{factor}) catch "Slow factor updated";
             query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, err_msg);
@@ -463,7 +503,11 @@ pub fn main(init: std.process.Init) !void {
                 query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, ok_msg);
                 continue;
             }
-            playback.setEffectFast(io, factor);
+            Playback.setEffectFast(io, factor) catch |err| {
+                std.debug.print("[soundbot] failed to set fast effect value: {}\n", .{err});
+                query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Error");
+                continue;
+            };
             var buf: [64]u8 = undefined;
             const err_msg = std.fmt.bufPrint(&buf, "Fast+pitch-up factor set to {d}x", .{factor}) catch "Fast factor updated";
             query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, err_msg);
@@ -482,7 +526,11 @@ pub fn main(init: std.process.Init) !void {
                 query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, ok_msg);
                 continue;
             }
-            playback.setReverbChance(io, percent);
+            Playback.setReverbChance(io, percent) catch |err| {
+                std.debug.print("[soundbot] failed to set reverb chance: {}\n", .{err});
+                query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Error");
+                continue;
+            };
             var buf: [96]u8 = undefined;
             const err_msg = std.fmt.bufPrint(&buf, "Reverb chance set to {d}% (independent of !chance)", .{percent}) catch "Reverb chance updated";
             query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, err_msg);
@@ -501,7 +549,11 @@ pub fn main(init: std.process.Init) !void {
                 query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, err_msg);
                 continue;
             }
-            playback.setReverbAmount(io, amount);
+            Playback.setReverbAmount(io, amount) catch |err| {
+                std.debug.print("[soundbot] failed to set reverb amount: {}\n", .{err});
+                query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Error");
+                continue;
+            };
             var buf: [64]u8 = undefined;
             const ok_msg = std.fmt.bufPrint(&buf, "Reverb amount set to {d}", .{amount}) catch "Reverb amount updated";
             query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, ok_msg);
@@ -520,7 +572,11 @@ pub fn main(init: std.process.Init) !void {
                 query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, err_msg);
                 continue;
             }
-            playback.setVolume(io, percent, cfg.sink);
+            Playback.setVolume(io, percent, cfg.sink) catch |err| {
+                std.debug.print("[soundbot] failed to set volume: {}\n", .{err});
+                query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Error");
+                continue;
+            };
             var buf: [128]u8 = undefined;
             const ok_msg = std.fmt.bufPrint(&buf, "Volume set to {d}%", .{percent}) catch "Volume updated";
             query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, ok_msg);
@@ -539,7 +595,11 @@ pub fn main(init: std.process.Init) !void {
                 query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, err_msg);
                 continue;
             }
-            playback.setYtVolume(io, percent, cfg.sink);
+            Playback.setYtVolume(io, percent, cfg.sink) catch |err| {
+                std.debug.print("[soundbot] failed to set youtube volume: {}\n", .{err});
+                query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Error");
+                continue;
+            };
             var buf: [128]u8 = undefined;
             const ok_msg = std.fmt.bufPrint(&buf, "YouTube volume set to {d}%", .{percent}) catch "Yt volume updated";
             query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, ok_msg);
@@ -549,12 +609,20 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, name, "compressor")) {
             const rest = std.mem.trim(u8, after_bang[name_end..], " \t");
             if (std.mem.eql(u8, rest, "on")) {
-                playback.setCompressorEnabled(io, true);
+                Playback.setCompressorEnabled(io, true) catch |err| {
+                    std.debug.print("[soundbot] failed to enable compressor: {}\n", .{err});
+                    query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Error");
+                    continue;
+                };
                 query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Compressor enabled - evens out loud/quiet sounds.");
                 continue;
             }
             if (std.mem.eql(u8, rest, "off")) {
-                playback.setCompressorEnabled(io, false);
+                Playback.setCompressorEnabled(io, false) catch |err| {
+                    std.debug.print("[soundbot] failed to disable compressor: {}\n", .{err});
+                    query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Error");
+                    continue;
+                };
                 query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Compressor disabled.");
                 continue;
             }
@@ -598,7 +666,11 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             }
 
-            playback.setCompressorParams(io, threshold_percent, ratio, makeup);
+            Playback.setCompressorParams(io, threshold_percent, ratio, makeup) catch |err| {
+                std.debug.print("[soundbot] failed to set compressor params: {}\n", .{err});
+                query.replyToTrigger(allocator, io, stdin, &line_reader, trimmed, cfg.channel_id, "Error");
+                continue;
+            };
             var buf: [128]u8 = undefined;
             const ok_msg = std.fmt.bufPrint(
                 &buf,
@@ -619,7 +691,7 @@ pub fn main(init: std.process.Init) !void {
             while (parts.next()) |sound| {
                 if (sound.len == 0 or sound.len >= 100) continue;
 
-                const found = playback.triggerSound(allocator, io, rand, cfg.sounds_dir, sound) catch |err| {
+                const found = Playback.triggerSound(allocator, io, rand, cfg.sounds_dir, sound) catch |err| {
                     std.debug.print("[soundbot] Couldn't play {s}: {}\n", .{ sound, err });
                     continue;
                 };
@@ -634,7 +706,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         if (std.mem.eql(u8, name, "r") or std.mem.eql(u8, name, "random")) {
-            _ = playback.triggerRandomSound(allocator, io, rand, cfg.sounds_dir) catch |err| {
+            _ = Playback.triggerRandomSound(allocator, io, rand, cfg.sounds_dir) catch |err| {
                 std.debug.print("[soundbot] Couldn't play a random sound: {}\n", .{err});
             };
 
@@ -643,11 +715,71 @@ pub fn main(init: std.process.Init) !void {
 
         if (name.len >= 100) continue;
 
-        _ = playback.triggerSound(allocator, io, rand, cfg.sounds_dir, name) catch |err| {
+        _ = Playback.triggerSound(allocator, io, rand, cfg.sounds_dir, name) catch |err| {
             std.debug.print("[soundbot] trigger failed: {}\n", .{err});
         };
     }
 
     _ = stdin.writeStreamingAll(io, "quit\n") catch {};
     _ = try child.wait(io);
+}
+
+fn handleTtsCommandThread(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, voice_id: []const u8, engine: ?[]const u8, raw_text: []u8) void {
+    defer allocator.free(raw_text);
+    TTS.handleTtsCommand(allocator, io, rand, voice_id, engine, raw_text) catch |err| {
+        std.debug.print("[soundbot] tts command failed: {}\n", .{err});
+    };
+}
+
+fn handleYtCommandThread(allocator: std.mem.Allocator, io: std.Io, rand: std.Random, raw_query: []u8) void {
+    defer allocator.free(raw_query);
+    Youtube.handleYtCommand(allocator, io, rand, raw_query) catch |err| {
+        std.debug.print("[soundbot] youtube command failed: {}\n", .{err});
+    };
+}
+
+fn buildSoundsList(allocator: std.mem.Allocator, io: std.Io, sounds_dir: []const u8) ![]u8 {
+    var sound_groups = try Sounds.buildSoundGroups(allocator, io, sounds_dir);
+    defer sound_groups.deinit(allocator);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    if (sound_groups.groups.len == 0) {
+        try out.appendSlice(allocator, "No sounds available.");
+    } else {
+        try out.appendSlice(allocator, "Available sounds:\n\n");
+        for (sound_groups.groups) |group| {
+            try out.appendSlice(allocator, "* !");
+            try out.appendSlice(allocator, group.key);
+
+            if (group.members.len > 0) {
+                try out.appendSlice(allocator, " (");
+                for (group.members, 0..) |m, i| {
+                    if (i > 0) try out.append(allocator, ' ');
+                    try out.append(allocator, '!');
+                    try out.appendSlice(allocator, m);
+                }
+                try out.appendSlice(allocator, ")");
+            }
+            try out.append(allocator, '\n');
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn buildVoicesList(allocator: std.mem.Allocator) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "Available voices:\n\n");
+    for (TTS.tts_voices) |v| {
+        try out.appendSlice(allocator, "* !");
+        try out.appendSlice(allocator, v.cmd);
+        try out.appendSlice(allocator, " - ");
+        try out.appendSlice(allocator, v.voice_id);
+        try out.appendSlice(allocator, " (");
+        try out.appendSlice(allocator, v.language);
+        try out.appendSlice(allocator, ")\n");
+    }
+    try out.appendSlice(allocator, "* !tts - random voice\n");
+    return out.toOwnedSlice(allocator);
 }
