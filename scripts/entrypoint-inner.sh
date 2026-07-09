@@ -23,12 +23,8 @@ echo "[entrypoint] starting x11vnc (for one-time manual setup / occasional debug
 x11vnc -display "$DISPLAY" -nopw -listen 0.0.0.0 -xkb -forever -shared &
  
 echo "[entrypoint] starting PulseAudio and creating virtual sink '$SINK_NAME'"
-# Larger fragments prevent the "Underflow occurred on device" warnings that
-# appear in headless/virtual-sink setups when PulseAudio runs out of data
-# faster than the source produces it. Default fragments (4x5ms=20ms) are
-# tuned for real hardware with DMA interrupts; virtual sinks need more headroom.
-mkdir -p /etc/pulse
-cat > /etc/pulse/daemon.conf << PULSE_EOF
+mkdir -p ~/.config/pulse
+cat > ~/.config/pulse/daemon.conf << PULSE_EOF
 default-sample-rate = 48000
 default-fragments = 8
 default-fragment-size-msec = 25
