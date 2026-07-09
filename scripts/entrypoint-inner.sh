@@ -10,7 +10,7 @@ DISPLAY_NUM="${DISPLAY#:}"
 rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
 
 echo "[entrypoint] starting Xvfb on $DISPLAY"
-Xvfb "$DISPLAY" -screen 0 800x800x16 &
+Xvfb "$DISPLAY" -screen 0 800x600x16 &
 for i in $(seq 1 20); do
     if xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
         echo "[entrypoint] Xvfb is ready"
@@ -28,35 +28,24 @@ sleep 1
 pactl load-module module-null-sink sink_name="$SINK_NAME" sink_properties=device.description="$SINK_NAME" 2>/dev/null || true
 pactl set-default-source "${SINK_NAME}.monitor"
 
-# A second, separate sink purely for the TS6 client's own *output* (what it
-# plays back from other speakers in the channel). Without this, the client's
-# output defaults to the only sink that exists - the same one used as its mic
-# input - creating a feedback loop: anything it hears gets played into that
-# sink, immediately recaptured by the mic, and retransmitted whenever the bot's
-# PTT happens to be open (i.e., while playing a sound).
+# A second sink for the TS3 client's own playback output (what it receives
+# from other speakers in the channel). Without this, the client would output
+# to the same sink used as its mic source, creating a feedback loop.
 pactl load-module module-null-sink sink_name="${SINK_NAME}_output" sink_properties=device.description="${SINK_NAME}_output" 2>/dev/null || true
 pactl set-default-sink "${SINK_NAME}_output"
 
-echo "[entrypoint] launching TS6 client"
+echo "[entrypoint] launching TS3 client"
 cd /opt/soundbot/teamspeak-client
-if [ ! -x ./TeamSpeak ]; then
-    echo "[entrypoint] ERROR: /opt/soundbot/teamspeak-client/TeamSpeak not found or not executable."
+if [ ! -x ./ts3client_runscript.sh ]; then
+    echo "[entrypoint] ERROR: /opt/soundbot/teamspeak-client/ts3client_runscript.sh not found or not executable."
     echo "[entrypoint] Did you mount your teamspeak-client/ folder into this container? See README."
     exit 1
 fi
 
-# Chromium (which the client's UI is built on) writes a SingletonLock file
-# into its profile dir, encoding the *hostname* of whoever holds it, to stop
-# two instances corrupting the same profile concurrently. Since the profile
-# persists across container recreations but Docker assigns each one a new
-# random hostname, any unclean shutdown of a previous container leaves a lock
-# that looks like it belongs to "another computer" forever after - clearing
-# it defensively here, same as the Xvfb lock cleanup above.
-find "$HOME/.cache/TeamSpeak" -maxdepth 2 \
-    \( -name SingletonLock -o -name SingletonSocket -o -name SingletonCookie \) \
-    -delete 2>/dev/null || true
-
-DISPLAY="$DISPLAY" ./TeamSpeak --no-sandbox &
+# The TS3 client connects automatically to whatever bookmark has
+# "Connect on startup" enabled - set this up once via VNC during
+# the one-time manual setup, and it persists in the profile volume.
+DISPLAY="$DISPLAY" ./ts3client_runscript.sh &
 sleep 5
 
 echo "[entrypoint] starting soundbot"

@@ -3,7 +3,6 @@ const std = @import("std");
 const config_mod = @import("config.zig");
 const ts_protocol = @import("ts_protocol.zig");
 const query = @import("query.zig");
-const playback = @import("playback.zig");
 
 const Sounds = @import("zound").Sounds;
 const Playback = @import("zound").Playback;
@@ -50,8 +49,6 @@ const help_text =
 // anti-flood heuristics tripping on a rapid reconnect from the same IP).
 
 var g_shutdown_requested = std.atomic.Value(bool).init(false);
-
-var g_ssh_stdin: ?std.Io.File = null;
 
 fn handleShutdownSignal(_: @TypeOf(std.posix.SIG.INT)) callconv(.c) void {
     g_shutdown_requested.store(true, .release);
@@ -135,14 +132,13 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("[soundbot] Failed to set youtube cookies path {}\n", .{err});
     };
 
-    const player_ctx = try allocator.create(playback.PlayerCtx);
+    const player_ctx = try allocator.create(Playback.PlayerCtx);
     player_ctx.* = .{
         .allocator = allocator,
         .io = io,
-        .ptt_key = cfg.ptt_key,
         .sink = cfg.sink,
     };
-    const player_thread = try std.Thread.spawn(.{}, playback.playerLoop, .{player_ctx});
+    const player_thread = try std.Thread.spawn(.{}, Playback.playerLoop, .{player_ctx});
     player_thread.detach();
 
     if (cfg.tg_bot_token) |token| {
