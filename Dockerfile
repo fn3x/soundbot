@@ -29,6 +29,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl unzip util-linux awscli \
     libqt5widgets5 libqt5multimedia5 libqt5x11extras5 libqt5dbus5 libqt5network5 \
     libopenal1 \
+    libnss3 libnspr4 \
+    libevent-2.1-7 libpci3 libxslt1.1 libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 # PulseAudio actively refuses to run as root (by design), so the whole
