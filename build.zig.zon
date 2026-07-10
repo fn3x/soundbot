@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zound = .{
-            .url = "git+https://codeberg.org/fn3x/zound#27c09800dd1b5e3b7b7df5b0660ce684669d679c",
-            .hash = "zound-1.0.0-ngdG10t1AABVRcY_hpC8dzKn1QZHG0y5JgpzLd79KKT8",
+            .url = "git+https://codeberg.org/fn3x/zound#c96a75305cd25e5f79fbdbfdc7eef48d1aaca708",
+            .hash = "zound-1.0.0-ngdG17l1AACtzxZqdeAz4uBg565-DCb9Ge2nNHsLlCOU",
         },
     },
     .paths = .{
