@@ -40,6 +40,7 @@ for i in $(seq 1 30); do
 done
 pactl load-module module-null-sink sink_name="$SINK_NAME" sink_properties=device.description="$SINK_NAME" 2>/dev/null || true
 pactl set-default-source "${SINK_NAME}.monitor"
+pactl suspend-sink "$SINK_NAME" 0
 
 # A second sink for the TS3 client's own playback output (what it receives
 # from other speakers in the channel). Without this, the client would output
