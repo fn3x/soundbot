@@ -27,11 +27,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg mpg123 sox libsox-fmt-all \
     openssh-client sshpass \
     ca-certificates curl unzip util-linux awscli \
+    python3-pip \
     libqt5widgets5 libqt5multimedia5 libqt5x11extras5 libqt5dbus5 libqt5network5 \
     libopenal1 \
     libnss3 libnspr4 \
     libevent-2.1-7 libpci3 libxslt1.1 libatomic1 \
     && rm -rf /var/lib/apt/lists/*
+
+RUN pip install curl_cffi --break-system-packages
 
 # PulseAudio actively refuses to run as root (by design), so the whole
 # container runs as a real unprivileged user instead.
